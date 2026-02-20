@@ -9,5 +9,8 @@
   "devDependencies": {
     "@types/node": "^20.19.33",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0"
   }
 }
