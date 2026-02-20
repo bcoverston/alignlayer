@@ -33,21 +33,54 @@ const BOUNDARY_TOKENS = [
 ];
 
 const EXEC_TOOLS = new Set(["exec", "bash", "shell", "run", "computer"]);
+
+const FORCE_FLAGS     = new Set(["-f", "--force", "--hard", "--no-backup", "--overwrite", "--delete"]);
+const RECURSIVE_FLAGS = new Set(["-r", "-R", "--recursive", "--all", "-A", "--all-namespaces"]);
+const DRY_RUN_FLAGS   = new Set(["--dry-run", "-n", "--simulate", "--check", "--preview", "--no-act"]);
+const INTERACTIVE_FLAGS = new Set(["-i", "--interactive", "--confirm", "--prompt"]);
+
 const RISK_THRESHOLD = 0.55;
 const MAX_CONFIDENT_CALLS = 6;
+
+function expandFlag(f: string): string[] {
+  if (f.startsWith("-") && !f.startsWith("--") && f.length > 2)
+    return f.slice(1).split("").map((c) => `-${c}`);
+  return [f];
+}
+function normalizeFlag(f: string): string { const eq = f.indexOf("="); return eq === -1 ? f : f.slice(0, eq); }
+function tokenizeCommand(cmd: string): { command: string; subcommand: string; flags: string[] } {
+  const parts = cmd.trim().split(/\s+/).filter(Boolean);
+  const command = (parts[0] ?? "").toLowerCase();
+  const rest = parts.slice(1);
+  const flags = rest.filter((p) => p.startsWith("-")).flatMap(expandFlag).map(normalizeFlag);
+  const positional = rest.filter((p) => !p.startsWith("-"));
+  return { command, subcommand: (positional[0] ?? "").toLowerCase(), flags };
+}
+function flagModifier(flags: string[]): number {
+  let mod = 0;
+  if (flags.some((f) => FORCE_FLAGS.has(f)))       mod += 0.2;
+  if (flags.some((f) => RECURSIVE_FLAGS.has(f)))   mod += 0.1;
+  if (flags.some((f) => DRY_RUN_FLAGS.has(f)))     mod -= 0.4;
+  if (flags.some((f) => INTERACTIVE_FLAGS.has(f))) mod -= 0.2;
+  return mod;
+}
 
 function blastRadius(toolName: string, args: Record<string, unknown>): number {
   const name = toolName.toLowerCase();
   const cmdStr = EXEC_TOOLS.has(name)
     ? String(args["command"] ?? args["cmd"] ?? args["input"] ?? "")
     : "";
-  const searchable = `${name} ${cmdStr} ${JSON.stringify(args)}`.toLowerCase();
-
   let s = 0;
   if (EXEC_TOOLS.has(name)) s += 0.25;
-  if (IRREVERSIBILITY_TOKENS.some((t) => searchable.includes(t))) s += 0.5;
-  if (BOUNDARY_TOKENS.some((t) => searchable.includes(t))) s += 0.25;
-  return Math.min(1.0, s);
+  if (cmdStr) {
+    const { command, subcommand, flags } = tokenizeCommand(cmdStr);
+    if (IRREVERSIBILITY_TOKENS.some((t) => `${command} ${subcommand}`.includes(t)))
+      s += 0.5 + flagModifier(flags);
+  } else {
+    if (IRREVERSIBILITY_TOKENS.some((t) => `${name} ${JSON.stringify(args)}`.toLowerCase().includes(t))) s += 0.5;
+  }
+  if (BOUNDARY_TOKENS.some((t) => `${name} ${cmdStr} ${JSON.stringify(args)}`.toLowerCase().includes(t))) s += 0.25;
+  return Math.max(0, Math.min(1.0, s));
 }
 
 function planConfidence(toolCallIndexInRun: number): number {

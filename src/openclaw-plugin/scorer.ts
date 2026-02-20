@@ -10,6 +10,8 @@
  */
 
 // Tokens that signal irreversible or high-consequence actions.
+// Matched against the command name + first positional (subcommand) only —
+// not against flags, to avoid false positives from --delete-branch, etc.
 const IRREVERSIBILITY_TOKENS = [
   "push",
   "send",
@@ -30,6 +32,7 @@ const IRREVERSIBILITY_TOKENS = [
 ];
 
 // Tokens that signal crossing a trust boundary (external / networked / cross-repo).
+// Checked against the full command string — URLs and endpoints appear anywhere.
 const BOUNDARY_TOKENS = [
   "curl",
   "wget",
@@ -48,6 +51,13 @@ const BOUNDARY_TOKENS = [
 // Tool names treated as high-capability execution surfaces (can do anything).
 const EXEC_TOOLS = new Set(["exec", "bash", "shell", "run", "computer"]);
 
+// Flags that amplify blast radius when an irreversibility token is already matched.
+const FORCE_FLAGS     = new Set(["-f", "--force", "--hard", "--no-backup", "--overwrite", "--delete"]);
+const RECURSIVE_FLAGS = new Set(["-r", "-R", "--recursive", "--all", "-A", "--all-namespaces"]);
+// Flags that reduce blast radius — action is tentative or user-gated.
+const DRY_RUN_FLAGS     = new Set(["--dry-run", "-n", "--simulate", "--check", "--preview", "--no-act"]);
+const INTERACTIVE_FLAGS = new Set(["-i", "--interactive", "--confirm", "--prompt"]);
+
 // Threshold above which a risk score routes to interrupt rather than allow.
 export const RISK_THRESHOLD = 0.55;
 
@@ -61,37 +71,98 @@ export interface RiskScore {
   decision: "allow" | "interrupt";
 }
 
+// ---------------------------------------------------------------------------
+// Command tokenizer
+// ---------------------------------------------------------------------------
+
+interface Tokens {
+  /** Lowercased base command (e.g. "git", "rm", "kubectl"). */
+  command: string;
+  /** First positional arg — often the subcommand (e.g. "push", "delete"). */
+  subcommand: string;
+  /** Normalized flags: combined short flags expanded, =value suffixes stripped. */
+  flags: string[];
+}
+
+/** Expand combined short flags: -rf → ["-r", "-f"] */
+function expandFlag(f: string): string[] {
+  if (f.startsWith("-") && !f.startsWith("--") && f.length > 2) {
+    return f.slice(1).split("").map((c) => `-${c}`);
+  }
+  return [f];
+}
+
+/** Strip =value suffix for long flags: --dry-run=client → --dry-run */
+function normalizeFlag(f: string): string {
+  const eq = f.indexOf("=");
+  return eq === -1 ? f : f.slice(0, eq);
+}
+
+function tokenizeCommand(cmd: string): Tokens {
+  const parts = cmd.trim().split(/\s+/).filter(Boolean);
+  const command = (parts[0] ?? "").toLowerCase();
+  const rest = parts.slice(1);
+  const rawFlags = rest.filter((p) => p.startsWith("-"));
+  const positional = rest.filter((p) => !p.startsWith("-"));
+  const flags = rawFlags.flatMap(expandFlag).map(normalizeFlag);
+  return { command, subcommand: (positional[0] ?? "").toLowerCase(), flags };
+}
+
+/**
+ * Flag-based modifier applied when an irreversibility token is matched.
+ * Amplifiers push the score up; safety valves (dry-run, interactive) pull it down.
+ */
+function flagModifier(flags: string[]): number {
+  let mod = 0;
+  if (flags.some((f) => FORCE_FLAGS.has(f)))       mod += 0.2;
+  if (flags.some((f) => RECURSIVE_FLAGS.has(f)))   mod += 0.1;
+  if (flags.some((f) => DRY_RUN_FLAGS.has(f)))     mod -= 0.4;
+  if (flags.some((f) => INTERACTIVE_FLAGS.has(f))) mod -= 0.2;
+  return mod;
+}
+
+// ---------------------------------------------------------------------------
+// Blast radius
+// ---------------------------------------------------------------------------
+
 /**
  * Estimate blast radius from tool name and serialised args.
  *
- * Score is additive across signal categories, capped at 1.0.
+ * For exec-class tools the command string is tokenized so that flags are
+ * scored separately from the command/subcommand — `rm -i` scores lower than
+ * `rm -rf`, and `git push --dry-run` does not trigger at all.
+ *
+ * Score is additive across signal categories, clamped to [0, 1].
  */
 export function blastRadius(
   toolName: string,
   args: Record<string, unknown>
 ): number {
   const name = toolName.toLowerCase();
-
-  // For exec tools, the real signal is in the command string.
   const cmdStr = EXEC_TOOLS.has(name)
     ? String(args["command"] ?? args["cmd"] ?? args["input"] ?? "")
     : "";
 
-  const searchable = `${name} ${cmdStr} ${JSON.stringify(args)}`.toLowerCase();
+  let s = 0;
+  if (EXEC_TOOLS.has(name)) s += 0.25; // baseline: exec surface
 
-  let score = 0.0;
+  if (cmdStr) {
+    const { command, subcommand, flags } = tokenizeCommand(cmdStr);
+    const cmdSpace = `${command} ${subcommand}`;
+    if (IRREVERSIBILITY_TOKENS.some((t) => cmdSpace.includes(t))) {
+      s += 0.5 + flagModifier(flags);
+    }
+  } else {
+    // Non-exec tool: check serialized args for irreversibility signals.
+    const searchable = `${name} ${JSON.stringify(args)}`.toLowerCase();
+    if (IRREVERSIBILITY_TOKENS.some((t) => searchable.includes(t))) s += 0.5;
+  }
 
-  if (EXEC_TOOLS.has(name)) score += 0.25; // baseline: can execute arbitrary code
+  // Boundary tokens: URLs and endpoints can appear anywhere in the command.
+  const fullStr = `${name} ${cmdStr} ${JSON.stringify(args)}`.toLowerCase();
+  if (BOUNDARY_TOKENS.some((t) => fullStr.includes(t))) s += 0.25;
 
-  const irreversible = IRREVERSIBILITY_TOKENS.some((t) =>
-    searchable.includes(t)
-  );
-  if (irreversible) score += 0.5;
-
-  const crossesBoundary = BOUNDARY_TOKENS.some((t) => searchable.includes(t));
-  if (crossesBoundary) score += 0.25;
-
-  return Math.min(1.0, score);
+  return Math.max(0, Math.min(1.0, s));
 }
 
 /**
