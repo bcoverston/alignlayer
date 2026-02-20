@@ -1,65 +1,37 @@
-# OpenClaw — Minimal PR for Blocking Approval Workflow
+# OpenClaw PR — `exec_approval_requested` plugin hook
 
 ## Problem
 
-The AlignLayer hook can observe and score every tool call via the agent-events bus, but it cannot
-block execution. When a high-risk action is detected, we can log it — we cannot stop it.
+AlignLayer can score every non-exec tool call via `before_tool_call` (and block with `{ block: true }`).
+Exec tool calls bypass this path: they go through `processGatewayAllowlist` /
+`executeNodeHostCommand`, which register an approval and fire-and-forget `requestExecApprovalDecision`.
+By the time any plugin sees the result, the decision is already made.
 
-The exec-approvals mechanism already exists (ExecApprovalManager, `exec.approval.requested`
-broadcast, `/approve` UX), but it only fires for `exec`/`bash` tools when the security policy
-is configured to ask. There is no plugin hook that fires between "approval registered" and
-"awaiting decision."
+There is no hook point between "approval registered" and "awaiting human decision" where a plugin
+can inject its own scoring, enrich the approval prompt, or auto-resolve based on policy.
 
-## Goal
+## Solution
 
-Add a plugin hook that fires after an exec approval request is registered, giving AlignLayer a
-chance to (a) be notified, (b) surface its own interrupt to the user, and (c) resolve the
-approval decision via the gateway WS protocol.
+Add an `exec_approval_requested` void hook that fires immediately after the approval ID is
+registered, before the gateway awaits the human decision. The hook receives the approval ID and
+full exec context. A plugin can then call `exec.approval.resolve` on the gateway WS to
+auto-resolve — or simply observe and let the human decide as usual.
 
-## Chosen Approach: `exec_approval_requested` notification hook
-
-This is Option 1 (lower-risk, non-blocking hook) from the architecture analysis.
-
-A plugin subscribes to `exec_approval_requested`. When it fires:
-1. Plugin receives the approval ID and full exec context
-2. Plugin calls `exec.approval.resolve` on the gateway WS (it already has `operator.approvals`
-   scope if configured) with `allow-once | allow-always | deny`
-3. The in-flight approval promise in the gateway resolves and the agent continues
-
-The hook is fire-and-forget from the gateway's perspective. The gateway does not wait on it.
-The plugin drives resolution via the existing gateway WS protocol — no new IPC surface needed.
-
-**Why not Option 2 (defer/resolve callback)?**
-A synchronous `defer` hook that holds the agent's tool execution loop is fragile — if the plugin
-hangs, the agent hangs. The notification approach has zero risk to gateway stability.
+This is purely additive. No existing behavior changes. The hook is fire-and-forget from the
+gateway's perspective (same pattern as `after_tool_call`).
 
 ---
 
-## Files to Change
+## Diff
 
-```
-src/
-├── plugins/
-│   ├── types.ts          (+) new hook event type + result type
-│   └── hooks.ts          (+) wire into plugin runner
-└── bash-tools/
-    ├── exec-host-gateway.ts   (+) fire hook after approval registered
-    └── exec-host-node.ts      (+) fire hook after approval registered
-```
+### `src/plugins/types.ts`
 
-Total: ~40 lines of new code across 4 files. No existing behaviour changes.
-
----
-
-## Diff Sketch
-
-### `plugins/types.ts`
+Add after the last existing hook event/result block (before `PluginHookHandlerMap`):
 
 ```typescript
-// Add after existing hook types:
-
-export interface PluginHookExecApprovalRequestedEvent {
-  /** Approval ID — pass to exec.approval.resolve to unblock the pending decision. */
+// exec_approval_requested hook
+export type PluginHookExecApprovalRequestedEvent = {
+  /** Approval ID — pass to exec.approval.resolve to auto-resolve the pending decision. */
   id: string;
   command: string;
   cwd: string | null;
@@ -67,124 +39,182 @@ export interface PluginHookExecApprovalRequestedEvent {
   host: "gateway" | "node";
   agentId: string | null;
   sessionKey: string | null;
-  /** Unix ms — after this the gateway auto-expires the approval */
+  /** Unix ms — after this the gateway auto-expires the approval request */
   expiresAtMs: number;
-}
-
-// Add to PluginHooks interface:
-export interface PluginHooks {
-  // ... existing hooks ...
-  exec_approval_requested?: (
-    event: PluginHookExecApprovalRequestedEvent
-  ) => void | Promise<void>;
-}
-```
-
-### `plugins/hooks.ts`
-
-```typescript
-// Add to the hook runner (mirrors pattern of existing before_tool_call dispatch):
-
-export async function runExecApprovalRequestedHook(
-  plugins: LoadedPlugin[],
-  event: PluginHookExecApprovalRequestedEvent
-): Promise<void> {
-  for (const plugin of plugins) {
-    if (typeof plugin.hooks?.exec_approval_requested === "function") {
-      try {
-        await plugin.hooks.exec_approval_requested(event);
-      } catch (err) {
-        console.error(`[openclaw] plugin ${plugin.id} exec_approval_requested error:`, err);
-      }
-    }
-  }
-}
-```
-
-### `bash-tools/exec-host-gateway.ts`
-
-```typescript
-// In the path where requestExecApprovalDecision() is called:
-
-// Existing:
-const decision = await requestExecApprovalDecision({ id, command, cwd, ... });
-
-// Add before the await:
-void runExecApprovalRequestedHook(loadedPlugins, {
-  id,
-  command,
-  cwd: cwd ?? null,
-  host: "gateway",
-  agentId: agentId ?? null,
-  sessionKey: sessionKey ?? null,
-  expiresAtMs: Date.now() + APPROVAL_TIMEOUT_MS,
-});
-// Then continue to await decision as before.
-```
-
-### `bash-tools/exec-host-node.ts`
-
-```typescript
-// Same pattern — fire after approval ID is registered, before awaiting decision.
-void runExecApprovalRequestedHook(loadedPlugins, {
-  id,
-  command,
-  cwd: cwd ?? null,
-  host: "node",
-  agentId: agentId ?? null,
-  sessionKey: sessionKey ?? null,
-  expiresAtMs: Date.now() + APPROVAL_TIMEOUT_MS,
-});
-```
-
----
-
-## AlignLayer Integration (post-PR)
-
-Once this hook exists, `src/openclaw-plugin/handler.ts` registers for it at gateway startup:
-
-```typescript
-// In the gateway:startup handler, after subscribing to onAgentEvent:
-
-plugin.hooks.exec_approval_requested = async (event) => {
-  const { id, command, cwd, agentId, sessionKey } = event;
-
-  // Re-score using the actual command string (richer signal than tool name alone)
-  const riskScore = score("exec", { command }, 0);
-
-  // Write interrupt trace
-  appendTrace({ ..., decision: "interrupt", ... });
-
-  // Surface interrupt to user via gateway WS (requires operator.approvals scope)
-  // Implementation: use the existing gateway WS client to call exec.approval.resolve
-  // Gateway WS message: { type: "exec.approval.resolve", id, decision: "deny" | "allow-once" }
-
-  // For now (Phase 0.2): log the pending interrupt. Human resolves via /approve as usual.
-  // Phase 3: ML scorer drives the resolution automatically when confidence is high.
 };
 ```
 
+In `PluginHookName`:
+
+```diff
+   | "session_start"
+   | "session_end"
+   | "gateway_start"
+-  | "gateway_stop";
++  | "gateway_stop"
++  | "exec_approval_requested";
+```
+
+In `PluginHookHandlerMap` (after `gateway_stop` entry):
+
+```typescript
+  exec_approval_requested: (
+    event: PluginHookExecApprovalRequestedEvent,
+    ctx: PluginHookGatewayContext,
+  ) => Promise<void> | void;
+```
+
 ---
 
-## What This Unlocks
+### `src/plugins/hooks.ts`
 
-| Capability | Before PR | After PR |
-|---|---|---|
-| See exec tool calls | Yes (agent-events bus) | Yes |
-| Score risk | Yes | Yes |
-| Block exec calls | No | Yes (resolve via gateway WS) |
-| Block non-exec tools | No | No (before_tool_call plugin hook handles these) |
-| Surface custom interrupt UX | No | Yes (plugin fires before user sees /approve prompt) |
+Add after `runGatewayStop`, before the return object:
 
-**Non-exec tools** (read, write, web_search, etc.) are already interceptable via the existing
-`before_tool_call` plugin hook with `block: true`. The PR closes the gap specifically for exec
-tool calls where the approval path bypasses `before_tool_call`.
+```typescript
+  /**
+   * Run exec_approval_requested hook.
+   * Fires after an exec approval is registered, before the human decides.
+   * Plugins may call exec.approval.resolve to auto-resolve.
+   * Runs in parallel (fire-and-forget).
+   */
+  async function runExecApprovalRequested(
+    event: PluginHookExecApprovalRequestedEvent,
+    ctx: PluginHookGatewayContext,
+  ): Promise<void> {
+    return runVoidHook("exec_approval_requested", event, ctx);
+  }
+```
+
+In the return object:
+
+```diff
+     // Gateway hooks
+     runGatewayStart,
+     runGatewayStop,
++    runExecApprovalRequested,
+     // Utility
+```
+
+Also add to the import at the top:
+
+```diff
+-import type { ... PluginHookGatewayStopEvent ... } from "./types.js";
++import type { ... PluginHookGatewayStopEvent, PluginHookExecApprovalRequestedEvent ... } from "./types.js";
+```
 
 ---
 
-## Submission Notes
+### `src/agents/bash-tools.exec-host-gateway.ts`
 
-- Target: `openclaw` core repo (not open-source; submit as PR to owner)
-- Zero breaking changes — the hook is additive, no existing call sites change
-- Safe to land behind a feature flag (`plugins.enableExecApprovalHook: true`) if preferred
-- Pairs naturally with the AlignLayer plugin as a reference implementation
+In `processGatewayAllowlist`, inside the `if (requiresAsk)` block, immediately after
+`expiresAtMs` is defined and before the `void (async () => {` IIFE:
+
+```diff
++  // Notify plugins — they may observe or auto-resolve via exec.approval.resolve.
++  void hooks.runExecApprovalRequested(
++    {
++      id: approvalId,
++      command: params.command,
++      cwd: params.workdir ?? null,
++      host: "gateway",
++      agentId: params.agentId ?? null,
++      sessionKey: params.sessionKey ?? null,
++      expiresAtMs,
++    },
++    gatewayCtx,
++  );
++
+   void (async () => {
+     let decision: string | null = null;
+```
+
+`hooks` and `gatewayCtx` are already available in the call site (same pattern used for
+`before_tool_call`). Check the exact parameter names against the call site — `gatewayCtx`
+may be named `ctx` or constructed inline.
+
+---
+
+### `src/agents/bash-tools.exec-host-node.ts`
+
+In `executeNodeHostCommand`, inside the `if (requiresAsk)` block, same position:
+
+```diff
++  void hooks.runExecApprovalRequested(
++    {
++      id: approvalId,
++      command: params.command,
++      cwd: params.workdir ?? null,
++      host: "node",
++      agentId: params.agentId ?? null,
++      sessionKey: params.sessionKey ?? null,
++      expiresAtMs,
++    },
++    gatewayCtx,
++  );
++
+   void (async () => {
+     let decision: string | null = null;
+```
+
+---
+
+## Size
+
+~45 lines of new code across 4 files. No deletions. No behavior changes to existing paths.
+
+---
+
+## AlignLayer integration (post-merge)
+
+Once the hook exists, `src/openclaw-plugin/index.ts` registers:
+
+```typescript
+api.on("exec_approval_requested", async (event, ctx) => {
+  const { id, command, agentId, sessionKey, expiresAtMs } = event;
+
+  // Score using actual command string (richer than tool name alone)
+  const br = blastRadius("exec", { command });
+  const pc = planConfidence(nextCallIndex());
+  const risk = br * (1 - pc);
+
+  appendTrace({
+    runtime: "openclaw",
+    session_id: sessionKey ?? "",
+    turn_id: "",
+    timestamp: new Date().toISOString(),
+    event: "before_tool_call",
+    tool: "exec",
+    args: { command },
+    risk_score: risk,
+    blast_radius: br,
+    plan_confidence: pc,
+    decision: risk >= RISK_THRESHOLD ? "interrupt" : "allow",
+    human_outcome: null,
+  });
+
+  // Phase 0.2: observe only — human resolves via /approve as usual.
+  // Phase 3: call exec.approval.resolve when ML confidence is high.
+  // gateway WS: { type: "exec.approval.resolve", id, decision: "allow-once" | "deny" }
+});
+```
+
+---
+
+## What this closes
+
+| Capability                        | Today                    | Post-PR               |
+|-----------------------------------|--------------------------|-----------------------|
+| Score non-exec tool calls         | ✓ `before_tool_call`     | ✓                     |
+| Block non-exec tool calls         | ✓ `{ block: true }`      | ✓                     |
+| Observe exec tool calls           | ✗ bus broken             | ✓ `exec_approval_requested` |
+| Auto-resolve exec approvals       | ✗                        | ✓ via `exec.approval.resolve` |
+| Enrich approval prompt            | ✗                        | ✓ (plugin fires before user sees prompt) |
+
+---
+
+## Submission notes
+
+- Zero breaking changes — purely additive hook
+- Safe behind feature flag (`plugins.enableExecApprovalHook: true`) if preferred
+- AlignLayer plugin is the reference implementation
+- The `exec.approval.resolve` WS message format already exists — no new gateway protocol needed

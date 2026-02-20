@@ -184,10 +184,17 @@ export const hooks = {
       const interruptFile = path.join(tracesDir(), "pending-interrupts.jsonl");
       const entry = { timestamp: new Date().toISOString(), tool: toolName, risk, blast_radius: br, plan_confidence: pc };
       fs.appendFileSync(interruptFile, JSON.stringify(entry) + "\n", "utf8");
+
+      return {
+        block: true,
+        blockReason:
+          `AlignLayer: high-risk action blocked (risk=${risk.toFixed(2)}, ` +
+          `blast=${br.toFixed(2)}, confidence=${pc.toFixed(2)}). ` +
+          `Tool: ${toolName}. ` +
+          `Review the proposed action and re-invoke if appropriate.`,
+      };
     }
 
-    // Phase 0: observational — never block.
-    // Phase 3: return { block: true, blockReason: "..." } for decision === "interrupt".
     return {};
   },
 };
