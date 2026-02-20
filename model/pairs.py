@@ -313,59 +313,47 @@ def score_command(
     expected_tier: int = 2,
     *,
     dry_run: bool = False,
+    heuristic_only: bool = False,
 ) -> dict[str, Any]:
     """Score a command string.
 
-    Strategy (strawman → steel):
-    1. Compute heuristic blast radius.
-    2. If the score is outside the uncertain band AND the expected tier is not
-       adversarial, accept the heuristic — no model call.
-    3. Otherwise call Ollama: uncertain mid-band needs LLM nuance; adversarial
-       categories are specifically designed to fool token-matching heuristics.
+    Default: always call LLM — its score is the canonical training label.
+    The heuristic blast radius is stored alongside for comparison and
+    disagreement analysis, but NOT used as the risk label.
+
+    heuristic_only=True: skip LLM, use heuristic directly. Use only for
+    speed testing / offline mode — labels will be lower quality.
     """
-    if dry_run:
-        stub = (
-            0.1 if any(w in command for w in ("ls", "cat", "status", "get")) else
-            0.3 if any(w in command for w in ("install", "build", "add"))    else
-            0.5 if any(w in command for w in ("rm -i", "reset", "kill"))     else
-            0.7 if any(w in command for w in ("push", "publish", "apply"))   else
-            0.9
-        )
-        return {"risk": stub, "tier": int(stub * 4), "reasoning": "(dry-run stub)",
-                "flags": [], "scorer": "dry-run"}
-
+    # Heuristic always computed — stored as diagnostic field.
     h_blast = heuristic_blast_radius(command)
-    adversarial = expected_tier < 0
-    uncertain   = HEURISTIC_BAND_LO <= h_blast <= HEURISTIC_BAND_HI
+    h_tier  = 0 if h_blast < 0.2 else 1 if h_blast < 0.4 else 2 if h_blast < 0.6 else 3 if h_blast < 0.8 else 4
 
-    # If the heuristic tier disagrees with the generator's expected tier by ≥2
-    # levels, trust the generator — the heuristic is probably missing a token
-    # (e.g. kubectl apply, terraform destroy, helm upgrade).
-    h_tier = 0 if h_blast < 0.2 else 1 if h_blast < 0.4 else 2 if h_blast < 0.6 else 3 if h_blast < 0.8 else 4
-    tier_mismatch = expected_tier >= 0 and abs(expected_tier - h_tier) >= 2
-
-    if not adversarial and not uncertain and not tier_mismatch:
+    if dry_run or heuristic_only:
         return {
-            "risk":      h_blast,
-            "tier":      h_tier,
-            "reasoning": f"heuristic blast_radius={h_blast:.2f}",
-            "flags":     [],
-            "scorer":    "heuristic",
+            "risk":             h_blast,
+            "tier":             h_tier,
+            "reasoning":        f"heuristic blast_radius={h_blast:.2f}",
+            "flags":            [],
+            "scorer":           "dry-run" if dry_run else "heuristic",
+            "heuristic_blast":  h_blast,
         }
 
-    # LLM path — uncertain band or adversarial category.
+    # LLM is the canonical scorer for training data.
     prompt = f"Command: {command}\n\nScore this command."
     for attempt in range(MAX_RETRIES):
         try:
             raw = _ollama_complete(SCORE_SYSTEM, prompt)
             raw = raw.replace("```json", "").replace("```", "").strip()
             parsed = json.loads(raw)
+            llm_risk = float(parsed.get("risk", 0.5))
             return {
-                "risk":      float(parsed.get("risk", 0.5)),
-                "tier":      int(parsed.get("tier", 2)),
-                "reasoning": str(parsed.get("reasoning", "")),
-                "flags":     list(parsed.get("flags", [])),
-                "scorer":    f"llm:{OLLAMA_MODEL}",
+                "risk":            llm_risk,
+                "tier":            int(parsed.get("tier", 2)),
+                "reasoning":       str(parsed.get("reasoning", "")),
+                "flags":           list(parsed.get("flags", [])),
+                "scorer":          f"llm:{OLLAMA_MODEL}",
+                "heuristic_blast": h_blast,          # diagnostic: agreement/divergence
+                "heuristic_delta": round(abs(llm_risk - h_blast), 3),
             }
         except (json.JSONDecodeError, KeyError, ValueError) as exc:
             if attempt < MAX_RETRIES - 1:
@@ -502,10 +490,10 @@ def calibrate(n_sample: int = len(CALIBRATION_COMMANDS)) -> None:
     disagree: list[tuple[str, float, float]] = []
 
     for expected_tier, cmd in sample:
-        h_blast = heuristic_blast_radius(cmd)
         try:
-            llm_result = score_command(cmd, expected_tier=-99)  # force LLM via tier=-99
-            llm_risk = llm_result["risk"]
+            result = score_command(cmd, expected_tier)  # always LLM in calibrate
+            h_blast  = result["heuristic_blast"]
+            llm_risk = result["risk"]
         except Exception as exc:
             print(f"  {'LLM error':52} — {exc}")
             continue
@@ -548,6 +536,8 @@ def main() -> None:
                     help="Skip generation — use only cached/previously scored commands")
     ap.add_argument("--calibrate",     action="store_true",
                     help="Run heuristic-vs-LLM calibration check before corpus generation")
+    ap.add_argument("--heuristic-only", action="store_true",
+                    help="Use heuristic scorer only — no LLM calls (offline/speed testing)")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -609,7 +599,11 @@ def main() -> None:
             cmd = item["command"]
             key = _cache_key(cmd)
             try:
-                result = score_command(cmd, item["expected_tier"], dry_run=args.dry_run)
+                result = score_command(
+                    cmd, item["expected_tier"],
+                    dry_run=args.dry_run,
+                    heuristic_only=args.heuristic_only,
+                )
             except RuntimeError as exc:
                 with _print_lock:
                     print(f"  ✗ {cmd[:60]}: {exc}")
@@ -623,8 +617,9 @@ def main() -> None:
                 **result,
             }
             scorer_tag = entry.get("scorer", "?")
+            delta_str  = f" Δh={entry['heuristic_delta']:.2f}" if "heuristic_delta" in entry else ""
             with _print_lock:
-                print(f"  [{scorer_tag}]  {cmd[:55]}  risk={entry['risk']:.2f} tier={entry['tier']}")
+                print(f"  [{scorer_tag}]  {cmd[:50]}  risk={entry['risk']:.2f}{delta_str}")
             with _save_lock:
                 save_score(args.scores_cache, entry)
                 cache[key] = entry
