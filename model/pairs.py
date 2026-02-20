@@ -55,10 +55,17 @@ DISSIMILAR_THRESHOLD  = 0.35   # |delta| > this → label 1  (clearly different)
 
 DEFAULT_OUTPUT        = "data/synthetic/pairs-v0.jsonl"
 DEFAULT_SCORES_CACHE  = "data/synthetic/scores-cache.jsonl"
-MODEL                 = "claude-haiku-4-5-20251001"
+# Ollama is the default backend for training (runs locally, no API cost).
+# The 32B model is used when ComfyUI is not running (full 24GB available).
+# Set ALIGNLAYER_BACKEND=anthropic to use the Anthropic API instead.
+BACKEND               = os.environ.get("ALIGNLAYER_BACKEND", "ollama")
+OLLAMA_URL            = os.environ.get("ALIGNLAYER_OLLAMA_URL", "http://localhost:11434")
+OLLAMA_TRAINING_MODEL = os.environ.get("ALIGNLAYER_SCORER_MODEL", "qwen2.5-coder:32b")
+ANTHROPIC_MODEL       = "claude-haiku-4-5-20251001"
+
 MAX_RETRIES           = 3
 RETRY_DELAY_S         = 2.0
-RATE_LIMIT_DELAY_S    = 0.5    # between LLM calls
+RATE_LIMIT_DELAY_S    = 0.3    # between LLM calls (Ollama is local, can be tighter)
 
 # ---------------------------------------------------------------------------
 # Action catalog
@@ -180,15 +187,38 @@ Tiers:
 """
 
 
+def _call_ollama(prompt: str, model: str) -> str:
+    """Call Ollama's OpenAI-compatible chat endpoint."""
+    import urllib.request
+    body = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SCORE_SYSTEM},
+            {"role": "user",   "content": prompt},
+        ],
+        "temperature": 0,
+        "max_tokens": 256,
+        "stream": False,
+    }).encode()
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = json.loads(resp.read())
+    return data["choices"][0]["message"]["content"]
+
+
 def score_action(
-    client: anthropic.Anthropic,
+    client: "anthropic.Anthropic | None",
     tool: str,
     args: dict[str, Any],
     *,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     if dry_run:
-        # Return a deterministic mock so we can test the pipeline without API calls.
         text = action_text(tool, args)
         stub_risk = 0.1 if "ls" in text or "cat" in text or "status" in text else \
                     0.3 if "install" in text or "build" in text else \
@@ -201,13 +231,18 @@ def score_action(
 
     for attempt in range(MAX_RETRIES):
         try:
-            msg = client.messages.create(
-                model=MODEL,
-                max_tokens=256,
-                system=SCORE_SYSTEM,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = msg.content[0].text if msg.content else ""
+            if BACKEND == "ollama":
+                raw = _call_ollama(prompt, OLLAMA_TRAINING_MODEL)
+            else:
+                assert client is not None
+                msg = client.messages.create(
+                    model=ANTHROPIC_MODEL,
+                    max_tokens=256,
+                    system=SCORE_SYSTEM,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = msg.content[0].text if msg.content else ""
+
             raw = raw.replace("```json", "").replace("```", "").strip()
             parsed = json.loads(raw)
             return {
@@ -216,7 +251,7 @@ def score_action(
                 "reasoning": str(parsed.get("reasoning", "")),
                 "flags":     list(parsed.get("flags", [])),
             }
-        except (json.JSONDecodeError, KeyError, anthropic.APIError) as exc:
+        except (json.JSONDecodeError, KeyError) as exc:
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY_S * (attempt + 1))
             else:
@@ -299,7 +334,13 @@ def main() -> None:
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+
+    if BACKEND == "ollama":
+        client = None
+        print(f"Backend: Ollama ({OLLAMA_URL}, model={OLLAMA_TRAINING_MODEL})")
+    else:
+        client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+        print(f"Backend: Anthropic (model={ANTHROPIC_MODEL})")
 
     # Step 1 — score every catalog action (cache hits skip LLM call)
     cache = load_scores_cache(args.scores_cache)

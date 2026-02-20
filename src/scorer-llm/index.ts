@@ -1,129 +1,237 @@
 /**
  * AlignLayer — LLM risk scorer.
  *
- * Phase 3 component. Inactive in Phase 0/1 — the heuristic scorer in
- * scorer.ts is the only active scorer. This module is wired in at Phase 3
- * by replacing the heuristic call with scoreCombined().
+ * Supports two backends:
+ *   anthropic  — Anthropic API (ANTHROPIC_API_KEY)
+ *   ollama     — local Ollama server (default: http://localhost:11434)
  *
- * ## Design
+ * Two models in practice:
+ *   Training   — qwen2.5-coder:32b via Ollama (offline, batch, ComfyUI off)
+ *   Arbiter    — qwen2.5-coder:14b via Ollama (online, synchronous hook path)
  *
- * The LLM scorer is a second opinion, not a replacement for the tokenizer.
- * It is invoked only when the heuristic score falls in the uncertainty band
- * [BAND_LO, BAND_HI] — outside that range the heuristic result is
- * unambiguous and the LLM call is skipped.
+ * Score cache:
+ *   Runtime cache keyed by sha256(tool + JSON(args)).
+ *   Persisted to ALIGNLAYER_SCORER_CACHE_PATH (default: ~/.alignlayer/scorer-cache.jsonl).
+ *   Prevents re-scoring identical commands across hook invocations.
  *
- * When invoked, the LLM returns blast_radius + reasoning. The reasoning is
- * surfaced to the user on interrupt (explains *why*) and stored in the trace
- * as a label for future training.
- *
- * ## Integration points (Phase 3)
- *
- * Replace blastRadius() calls in:
- *   src/openclaw-plugin/index.ts     before_tool_call hook
- *   src/claudecode-hook/hook.ts      PreToolUse hook
- *
- * Both hooks already receive planConfidence — pass it through to scoreCombined().
- *
- * ## LLM choice
- *
- * Haiku by default — fast and cheap for a latency-sensitive hook path.
- * Override via ALIGNLAYER_SCORER_MODEL env var.
+ * Integration:
+ *   scoreCombined() is the main entry point. It applies the uncertainty band
+ *   filter and returns null when the heuristic result is unambiguous.
+ *   Wire into src/openclaw-plugin/index.ts and src/claudecode-hook/hook.ts
+ *   by replacing the heuristic-only path with scoreCombined() at Phase 3.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 import { SYSTEM_PROMPT, buildUserPrompt } from "./prompt.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
+export type Backend = "anthropic" | "ollama";
+
 export interface LLMScore {
-  /** Estimated blast radius from the LLM. */
   blastRadius: number;
-  /** Combined risk = blastRadius × (1 − planConfidence). */
   risk: number;
-  /** One-sentence explanation of the primary risk factor. */
   reasoning: string;
-  /** Key signals that drove the score (for trace annotation and UX). */
   flags: string[];
-  /** Model used. */
   model: string;
+  backend: Backend;
+  cached: boolean;
 }
 
 export interface ScorerOptions {
   /**
-   * Heuristic scores in [bandLo, bandHi] are ambiguous enough to warrant
-   * an LLM call. Outside this range the heuristic result is returned as-is.
-   * Default: [0.3, 0.7]
+   * LLM backend. Default: "ollama" if ALIGNLAYER_OLLAMA_URL is set or Ollama
+   * is reachable on localhost; otherwise "anthropic".
+   */
+  backend?: Backend;
+  /** Ollama base URL. Default: ALIGNLAYER_OLLAMA_URL or http://localhost:11434 */
+  ollamaUrl?: string;
+  /** Model name. Default: ALIGNLAYER_SCORER_MODEL or backend-specific default. */
+  model?: string;
+  /** Anthropic API key (anthropic backend only). Default: ANTHROPIC_API_KEY. */
+  apiKey?: string;
+  /**
+   * Heuristic scores in [bandLo, bandHi] trigger an LLM call.
+   * Outside this range the heuristic result is unambiguous. Default: [0.35, 0.75]
    */
   bandLo?: number;
   bandHi?: number;
-  /** Override the model. Default: ALIGNLAYER_SCORER_MODEL or claude-haiku-4-5-20251001 */
-  model?: string;
-  /** Anthropic API key. Default: ANTHROPIC_API_KEY env var. */
-  apiKey?: string;
-  /** Abort signal for timeout control. */
-  signal?: AbortSignal;
+  /** Request timeout in ms. Default: 8000. */
+  timeoutMs?: number;
+  /** Path to the persistent score cache JSONL file. */
+  cachePath?: string;
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Defaults
 // ---------------------------------------------------------------------------
 
-const DEFAULT_BAND_LO = 0.3;
-const DEFAULT_BAND_HI = 0.7;
-const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
+const DEFAULT_OLLAMA_URL       = "http://localhost:11434";
+const DEFAULT_OLLAMA_MODEL     = "qwen2.5-coder:14b";   // arbiter model
+const DEFAULT_ANTHROPIC_MODEL  = "claude-haiku-4-5-20251001";
+const DEFAULT_BAND_LO          = 0.35;
+const DEFAULT_BAND_HI          = 0.75;
+const DEFAULT_TIMEOUT_MS       = 8_000;
 
-interface LLMResponse {
-  blast_radius: number;
+function defaultCachePath(): string {
+  return (
+    process.env["ALIGNLAYER_SCORER_CACHE_PATH"] ??
+    path.join(process.env["HOME"] ?? "~", ".alignlayer", "scorer-cache.jsonl")
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Score cache
+// ---------------------------------------------------------------------------
+
+interface CacheEntry {
+  key: string;
+  tool: string;
+  blastRadius: number;
+  risk: number;
+  reasoning: string;
+  flags: string[];
+  model: string;
+  backend: Backend;
+  cachedAt: string;
+}
+
+// In-process cache — avoids disk reads on repeated calls within the same process.
+const memCache = new Map<string, CacheEntry>();
+let cacheLoaded = false;
+
+function cacheKey(tool: string, args: Record<string, unknown>): string {
+  const payload = `${tool}:${JSON.stringify(args)}`;
+  return crypto.createHash("sha256").update(payload).digest("hex").slice(0, 16);
+}
+
+function loadCache(cachePath: string): void {
+  if (cacheLoaded) return;
+  cacheLoaded = true;
+  try {
+    if (!fs.existsSync(cachePath)) return;
+    for (const line of fs.readFileSync(cachePath, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const entry = JSON.parse(line) as CacheEntry;
+      memCache.set(entry.key, entry);
+    }
+  } catch {
+    // Cache corrupt or missing — start fresh.
+  }
+}
+
+function saveToCache(cachePath: string, entry: CacheEntry): void {
+  memCache.set(entry.key, entry);
+  try {
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fs.appendFileSync(cachePath, JSON.stringify(entry) + "\n", "utf8");
+  } catch {
+    // Non-fatal — cache miss on next run.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ollama backend
+// ---------------------------------------------------------------------------
+
+interface OllamaResponse {
+  blastRadius: number;
+  blast_radius?: number; // accept snake_case from model output
   risk: number;
   reasoning: string;
   flags: string[];
 }
 
-function clamp(v: number): number {
-  return Math.max(0, Math.min(1, v));
+async function callOllama(
+  tool: string,
+  args: Record<string, unknown>,
+  planConfidence: number,
+  baseUrl: string,
+  model: string,
+  timeoutMs: number
+): Promise<OllamaResponse> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user",   content: buildUserPrompt(tool, args, planConfidence) },
+        ],
+        temperature: 0,
+        max_tokens: 256,
+        stream: false,
+      }),
+    });
+
+    if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
+    const data = await res.json() as { choices: Array<{ message: { content: string } }> };
+    const text = data.choices[0]?.message?.content ?? "";
+    const json = text.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "").trim();
+    const parsed = JSON.parse(json) as Partial<OllamaResponse>;
+
+    return {
+      blastRadius: Math.max(0, Math.min(1, Number(parsed.blastRadius ?? parsed.blast_radius ?? 0.5))),
+      risk:        Math.max(0, Math.min(1, Number(parsed.risk ?? 0.5))),
+      reasoning:   String(parsed.reasoning ?? ""),
+      flags:       Array.isArray(parsed.flags) ? parsed.flags.map(String) : [],
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-async function callLLM(
-  toolName: string,
+// ---------------------------------------------------------------------------
+// Anthropic backend
+// ---------------------------------------------------------------------------
+
+async function callAnthropic(
+  tool: string,
   args: Record<string, unknown>,
   planConfidence: number,
   model: string,
-  apiKey?: string,
-  signal?: AbortSignal
-): Promise<LLMResponse> {
+  apiKey: string | undefined,
+  timeoutMs: number
+): Promise<OllamaResponse> {
+  // Dynamic import keeps the Anthropic SDK optional — Ollama users don't need it.
+  const { default: Anthropic } = await import("@anthropic-ai/sdk") as { default: typeof import("@anthropic-ai/sdk").default };
   const client = new Anthropic({ apiKey });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const message = await client.messages.create(
-    {
-      model,
-      max_tokens: 256,
-      system: SYSTEM_PROMPT,
-      messages: [
-        {
-          role: "user",
-          content: buildUserPrompt(toolName, args, planConfidence),
-        },
-      ],
-    },
-    { signal }
-  );
+  try {
+    const msg = await client.messages.create(
+      {
+        model,
+        max_tokens: 256,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: "user", content: buildUserPrompt(tool, args, planConfidence) }],
+      },
+      { signal: controller.signal }
+    );
+    const text = msg.content[0]?.type === "text" ? msg.content[0].text : "";
+    const json = text.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "").trim();
+    const parsed = JSON.parse(json) as Partial<OllamaResponse>;
 
-  const text =
-    message.content[0]?.type === "text" ? message.content[0].text : "";
-
-  // Strip markdown code fences if the model wraps the JSON.
-  const jsonText = text.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "").trim();
-
-  const parsed = JSON.parse(jsonText) as Partial<LLMResponse>;
-
-  return {
-    blast_radius: clamp(Number(parsed.blast_radius ?? 0)),
-    risk: clamp(Number(parsed.risk ?? 0)),
-    reasoning: String(parsed.reasoning ?? ""),
-    flags: Array.isArray(parsed.flags) ? parsed.flags.map(String) : [],
-  };
+    return {
+      blastRadius: Math.max(0, Math.min(1, Number(parsed.blastRadius ?? parsed.blast_radius ?? 0.5))),
+      risk:        Math.max(0, Math.min(1, Number(parsed.risk ?? 0.5))),
+      reasoning:   String(parsed.reasoning ?? ""),
+      flags:       Array.isArray(parsed.flags) ? parsed.flags.map(String) : [],
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -131,62 +239,80 @@ async function callLLM(
 // ---------------------------------------------------------------------------
 
 /**
- * Score a tool call using the LLM, bypassing the uncertainty band filter.
- *
- * Use this for testing or for contexts where you always want an LLM opinion.
- * In production, prefer scoreCombined() which applies the band filter.
+ * Score a tool call using the configured LLM backend.
+ * Checks the persistent cache first; only calls the model on a cache miss.
  */
 export async function scoreLLM(
-  toolName: string,
+  tool: string,
   args: Record<string, unknown>,
   planConfidence: number,
   options: ScorerOptions = {}
 ): Promise<LLMScore> {
-  const model =
-    options.model ?? process.env["ALIGNLAYER_SCORER_MODEL"] ?? DEFAULT_MODEL;
+  const cachePath = options.cachePath ?? defaultCachePath();
+  loadCache(cachePath);
 
-  const raw = await callLLM(
-    toolName,
-    args,
-    planConfidence,
-    model,
-    options.apiKey,
-    options.signal
-  );
+  const key = cacheKey(tool, args);
+  const hit = memCache.get(key);
+  if (hit) {
+    return {
+      blastRadius: hit.blastRadius,
+      risk:        hit.risk,
+      reasoning:   hit.reasoning,
+      flags:       hit.flags,
+      model:       hit.model,
+      backend:     hit.backend,
+      cached:      true,
+    };
+  }
 
-  return {
-    blastRadius: raw.blast_radius,
-    risk: raw.risk,
-    reasoning: raw.reasoning,
-    flags: raw.flags,
+  const backend  = options.backend ?? "ollama";
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  let raw: OllamaResponse;
+  let model: string;
+
+  if (backend === "ollama") {
+    const baseUrl = options.ollamaUrl ?? process.env["ALIGNLAYER_OLLAMA_URL"] ?? DEFAULT_OLLAMA_URL;
+    model = options.model ?? process.env["ALIGNLAYER_SCORER_MODEL"] ?? DEFAULT_OLLAMA_MODEL;
+    raw = await callOllama(tool, args, planConfidence, baseUrl, model, timeoutMs);
+  } else {
+    model = options.model ?? process.env["ALIGNLAYER_SCORER_MODEL"] ?? DEFAULT_ANTHROPIC_MODEL;
+    raw = await callAnthropic(tool, args, planConfidence, model, options.apiKey, timeoutMs);
+  }
+
+  const entry: CacheEntry = {
+    key,
+    tool,
+    blastRadius: raw.blastRadius,
+    risk:        raw.risk,
+    reasoning:   raw.reasoning,
+    flags:       raw.flags,
     model,
+    backend,
+    cachedAt:    new Date().toISOString(),
   };
+  saveToCache(cachePath, entry);
+
+  return { ...raw, model, backend, cached: false };
 }
 
 /**
  * Combined scorer: heuristic fast-path + LLM for uncertain mid-band scores.
  *
- * @param toolName       - tool name as reported by the agent runtime
- * @param args           - tool arguments
- * @param heuristicScore - blast radius already computed by the tokenizer scorer
- * @param planConfidence - plan_confidence already computed (positional proxy)
- * @param options        - model, band thresholds, api key
- *
- * @returns LLMScore when LLM was invoked, null when heuristic was unambiguous.
- *          A null return means the caller should use the heuristic result directly.
+ * Returns LLMScore when the LLM was invoked, null when the heuristic score
+ * was outside the uncertainty band (caller should use the heuristic result).
  */
 export async function scoreCombined(
-  toolName: string,
+  tool: string,
   args: Record<string, unknown>,
-  heuristicScore: number,
+  heuristicBlastRadius: number,
   planConfidence: number,
   options: ScorerOptions = {}
 ): Promise<LLMScore | null> {
   const bandLo = options.bandLo ?? DEFAULT_BAND_LO;
   const bandHi = options.bandHi ?? DEFAULT_BAND_HI;
 
-  // Outside the uncertainty band the heuristic result is clear enough.
-  if (heuristicScore < bandLo || heuristicScore > bandHi) return null;
+  if (heuristicBlastRadius < bandLo || heuristicBlastRadius > bandHi) return null;
 
-  return scoreLLM(toolName, args, planConfidence, options);
+  return scoreLLM(tool, args, planConfidence, options);
 }
