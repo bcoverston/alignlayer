@@ -1,0 +1,22 @@
+{
+  "id": "alignlayer",
+  "name": "AlignLayer",
+  "version": "0.1.0",
+  "description": "Runtime preference alignment — scores tool calls, captures training traces",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "tracesDir": {
+        "type": "string",
+        "description": "Directory for JSONL trace output (default: /home/node/.openclaw/traces)"
+      }
+    }
+  },
+  "uiHints": {
+    "tracesDir": {
+      "label": "Traces directory",
+      "placeholder": "/home/node/.openclaw/traces"
+    }
+  }
+}

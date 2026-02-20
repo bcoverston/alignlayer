@@ -15,7 +15,55 @@
 
 import fs from "fs";
 import path from "path";
-import { score } from "./scorer.js";
+
+// ---------------------------------------------------------------------------
+// Scorer (inlined — OpenClaw's hook runtime does not resolve relative imports)
+// Keep in sync with scorer.ts
+// ---------------------------------------------------------------------------
+
+const IRREVERSIBILITY_TOKENS = [
+  "push", "send", "deploy", "drop", "delete", "rm", "truncate",
+  "overwrite", "destroy", "nuke", "reset", "purge", "wipe",
+  "revoke", "terminate", "kill",
+];
+
+const BOUNDARY_TOKENS = [
+  "curl", "wget", "fetch", "http://", "https://", "upload",
+  "email", "smtp", "webhook", "s3://", "gs://", "azure",
+];
+
+const EXEC_TOOLS = new Set(["exec", "bash", "shell", "run", "computer"]);
+const RISK_THRESHOLD = 0.55;
+const MAX_CONFIDENT_CALLS = 6;
+
+function blastRadius(toolName: string, args: Record<string, unknown>): number {
+  const name = toolName.toLowerCase();
+  const cmdStr = EXEC_TOOLS.has(name)
+    ? String(args["command"] ?? args["cmd"] ?? args["input"] ?? "")
+    : "";
+  const searchable = `${name} ${cmdStr} ${JSON.stringify(args)}`.toLowerCase();
+
+  let s = 0;
+  if (EXEC_TOOLS.has(name)) s += 0.25;
+  if (IRREVERSIBILITY_TOKENS.some((t) => searchable.includes(t))) s += 0.5;
+  if (BOUNDARY_TOKENS.some((t) => searchable.includes(t))) s += 0.25;
+  return Math.min(1.0, s);
+}
+
+function planConfidence(toolCallIndexInRun: number): number {
+  return Math.max(0.0, 1.0 - toolCallIndexInRun / MAX_CONFIDENT_CALLS);
+}
+
+function score(
+  toolName: string,
+  args: Record<string, unknown>,
+  toolCallIndexInRun: number
+): { blastRadius: number; planConfidence: number; risk: number; decision: "allow" | "interrupt" } {
+  const br = blastRadius(toolName, args);
+  const pc = planConfidence(toolCallIndexInRun);
+  const risk = br * (1 - pc);
+  return { blastRadius: br, planConfidence: pc, risk, decision: risk >= RISK_THRESHOLD ? "interrupt" : "allow" };
+}
 
 // ---------------------------------------------------------------------------
 // OpenClaw types (inferred from runtime; no published @types/openclaw package)
@@ -118,18 +166,27 @@ async function resolveOnAgentEvent(): Promise<OnAgentEvent | null> {
     | undefined;
   if (globalBus?.onAgentEvent) return globalBus.onAgentEvent;
 
-  const candidates = [
+  // Resolve relative to the gateway's own entry point (mirrors mission-control approach).
+  const candidates: string[] = [];
+  const mainPath = process.argv[1];
+  if (mainPath) {
+    const mainDir = path.dirname(mainPath);
+    candidates.push(path.join(mainDir, "infra", "agent-events.js"));
+    candidates.push(path.join(mainDir, "..", "dist", "infra", "agent-events.js"));
+  }
+  candidates.push(
     "/usr/local/lib/node_modules/openclaw/dist/infra/agent-events.js",
     "/opt/homebrew/lib/node_modules/openclaw/dist/infra/agent-events.js",
-    `${process.env["HOME"] ?? ""}/.npm-global/lib/node_modules/openclaw/dist/infra/agent-events.js`,
-  ];
+    `${process.env["HOME"] ?? ""}/.npm-global/lib/node_modules/openclaw/dist/infra/agent-events.js`
+  );
 
   for (const p of candidates) {
     try {
-      const mod = (await import(p)) as { onAgentEvent?: OnAgentEvent };
+      if (!fs.existsSync(p)) continue;
+      const mod = (await import(`file://${p}`)) as { onAgentEvent?: OnAgentEvent };
       if (mod.onAgentEvent) return mod.onAgentEvent;
     } catch {
-      // path not present — try next
+      // try next
     }
   }
 
@@ -253,13 +310,11 @@ export default async function handler(event: HookEvent): Promise<void> {
     const onAgentEvent = await resolveOnAgentEvent();
 
     if (!onAgentEvent) {
-      event.messages.push(
-        "[alignlayer] WARNING: could not resolve agent-events bus — tool interception disabled. " +
-          "Check OpenClaw install path."
-      );
+      console.error("[alignlayer] could not resolve agent-events bus — tool interception disabled");
       return;
     }
 
+    console.log("[alignlayer] subscribed to agent-events bus");
     onAgentEvent((payload: AgentEventPayload) => {
       try {
         if (payload.stream === "lifecycle") {
