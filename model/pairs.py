@@ -73,13 +73,13 @@ DEFAULT_N_PER_CAT     = 30     # commands generated per category
 
 BACKEND               = os.environ.get("ALIGNLAYER_BACKEND", "ollama")
 OLLAMA_URL            = os.environ.get("ALIGNLAYER_OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL          = os.environ.get("ALIGNLAYER_SCORER_MODEL", "qwen2.5-coder:32b")
+OLLAMA_MODEL          = os.environ.get("ALIGNLAYER_SCORER_MODEL", "qwen2.5-coder:14b")
 ANTHROPIC_MODEL       = "claude-haiku-4-5-20251001"
 
 MAX_RETRIES           = 3
 RETRY_DELAY_S         = 1.0
-REQUEST_TIMEOUT_S     = 120
-LLM_CONCURRENCY       = 4   # parallel Ollama requests for LLM-bound scoring
+REQUEST_TIMEOUT_S     = 300  # 32b can be slow; 5 min ceiling
+LLM_CONCURRENCY       = 2   # 32b is memory-heavy; 2 concurrent avoids swap thrash
 
 # Heuristic band: scores outside [LO, HI] are unambiguous — no LLM needed.
 HEURISTIC_BAND_LO     = 0.35
@@ -478,62 +478,40 @@ CALIBRATION_COMMANDS = [
 
 
 def calibrate(n_sample: int = len(CALIBRATION_COMMANDS)) -> None:
-    """Score a fixed sample with both heuristic and LLM; report disagreements.
-
-    All LLM calls run concurrently (up to LLM_CONCURRENCY) for speed.
-    """
+    """Score a fixed sample with both heuristic and LLM; print each result immediately."""
     sample = CALIBRATION_COMMANDS[:n_sample]
     print(f"\n{'═'*90}")
-    print(f"Calibration — {len(sample)} commands, heuristic vs LLM ({LLM_CONCURRENCY} concurrent)")
+    print(f"Calibration — {len(sample)} commands, model={OLLAMA_MODEL}")
     print(f"{'═'*90}")
-
-    # Score all commands concurrently.
-    results: dict[str, dict[str, Any]] = {}
-    errors:  dict[str, str] = {}
-    _lock = threading.Lock()
-
-    def _score(item: tuple[int, str]) -> None:
-        tier, cmd = item
-        try:
-            r = score_command(cmd, tier)
-            with _lock:
-                results[cmd] = r
-        except Exception as exc:
-            with _lock:
-                errors[cmd] = str(exc)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=LLM_CONCURRENCY) as pool:
-        list(pool.map(_score, sample))
-
-    # Print in original order.
-    print(f"{'Command':<52} {'exp':>3} {'h':>5} {'llm':>5} {'Δ':>5}  verdict")
-    print(f"{'─'*90}")
+    print(f"  {'Command':<50} {'exp':>3} {'h':>5} {'llm':>5} {'Δ':>5}  verdict")
+    print(f"  {'─'*80}")
 
     agree = 0
     disagree: list[tuple[str, float, float]] = []
 
-    for expected_tier, cmd in sample:
-        if cmd in errors:
-            print(f"  {cmd[:50]:<52} ✗ {errors[cmd][:30]}")
-            continue
-        result   = results[cmd]
-        h_blast  = result["heuristic_blast"]
-        llm_risk = result["risk"]
-        delta    = abs(h_blast - llm_risk)
-        verdict  = "✓ agree" if delta < 0.2 else "⚠ differ"
-        if delta < 0.2:
-            agree += 1
-        else:
-            disagree.append((cmd, h_blast, llm_risk))
-        print(f"  {cmd[:50]:<52} {expected_tier:>3} {h_blast:>5.2f} {llm_risk:>5.2f} {delta:>5.2f}  {verdict}")
+    for i, (expected_tier, cmd) in enumerate(sample):
+        print(f"  [{i+1:02d}/{len(sample)}] scoring: {cmd[:55]}...", end=" ", flush=True)
+        try:
+            result   = score_command(cmd, expected_tier)
+            h_blast  = result["heuristic_blast"]
+            llm_risk = result["risk"]
+            delta    = abs(h_blast - llm_risk)
+            verdict  = "✓" if delta < 0.2 else "⚠"
+            if delta < 0.2:
+                agree += 1
+            else:
+                disagree.append((cmd, h_blast, llm_risk))
+            print(f"\r  {cmd[:50]:<50} {expected_tier:>3} {h_blast:>5.2f} {llm_risk:>5.2f} {delta:>5.2f}  {verdict}")
+        except Exception as exc:
+            print(f"\r  {cmd[:50]:<50} ✗ {str(exc)[:35]}")
 
     total = agree + len(disagree)
-    print(f"{'─'*90}")
-    print(f"Agreement: {agree}/{total} ({100*agree/total:.0f}%)" if total else "No results.")
+    print(f"  {'─'*80}")
+    print(f"  Agreement: {agree}/{total} ({100*agree/total:.0f}%)" if total else "  No results.")
     if disagree:
-        print("\nLargest disagreements:")
+        print("\n  Largest disagreements:")
         for cmd, h, l in sorted(disagree, key=lambda x: abs(x[1]-x[2]), reverse=True)[:5]:
-            print(f"  heuristic={h:.2f} llm={l:.2f}  {cmd[:60]}")
+            print(f"    heuristic={h:.2f}  llm={l:.2f}  {cmd[:60]}")
     print(f"{'═'*90}\n")
 
 
