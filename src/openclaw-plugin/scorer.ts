@@ -147,11 +147,18 @@ export function blastRadius(
   if (EXEC_TOOLS.has(name)) s += 0.25; // baseline: exec surface
 
   if (cmdStr) {
-    const { command, subcommand, flags } = tokenizeCommand(cmdStr);
-    const cmdSpace = `${command} ${subcommand}`;
-    if (IRREVERSIBILITY_TOKENS.some((t) => cmdSpace.includes(t))) {
-      s += 0.5 + flagModifier(flags);
+    // Split on shell chain operators — score each segment, take the max.
+    // Prevents `cd /tmp && rm -rf /` from masking the dangerous second command.
+    const segments = cmdStr.split(/&&|\|\||;/).map((seg) => seg.trim()).filter(Boolean);
+    let maxIrreversibility = 0;
+    for (const seg of segments) {
+      const { command, subcommand, flags } = tokenizeCommand(seg);
+      const cmdSpace = `${command} ${subcommand}`;
+      if (IRREVERSIBILITY_TOKENS.some((t) => cmdSpace.includes(t))) {
+        maxIrreversibility = Math.max(maxIrreversibility, 0.5 + flagModifier(flags));
+      }
     }
+    s += maxIrreversibility;
   } else {
     // Non-exec tool: check serialized args for irreversibility signals.
     const searchable = `${name} ${JSON.stringify(args)}`.toLowerCase();
@@ -184,6 +191,12 @@ export function planConfidence(toolCallIndexInRun: number): number {
  * @param args - tool arguments
  * @param toolCallIndexInRun - 0-based index of this call within the current run
  */
+// Blast radius above which an action is considered unconditionally high-consequence.
+// At this threshold, risk carries a floor regardless of plan confidence —
+// `rm -rf /` on call 0 should not score 0.0 just because the agent is "confident".
+const BLAST_FLOOR_THRESHOLD = 0.75;
+const BLAST_FLOOR_RISK      = 0.60; // above RISK_THRESHOLD — always interrupts
+
 export function score(
   toolName: string,
   args: Record<string, unknown>,
@@ -191,7 +204,9 @@ export function score(
 ): RiskScore {
   const br = blastRadius(toolName, args);
   const pc = planConfidence(toolCallIndexInRun);
-  const risk = br * (1 - pc);
+  const rawRisk = br * (1 - pc);
+  // High-consequence actions carry a minimum risk regardless of plan confidence.
+  const risk = br >= BLAST_FLOOR_THRESHOLD ? Math.max(BLAST_FLOOR_RISK, rawRisk) : rawRisk;
 
   return {
     blastRadius: br,

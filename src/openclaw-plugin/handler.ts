@@ -73,9 +73,14 @@ function blastRadius(toolName: string, args: Record<string, unknown>): number {
   let s = 0;
   if (EXEC_TOOLS.has(name)) s += 0.25;
   if (cmdStr) {
-    const { command, subcommand, flags } = tokenizeCommand(cmdStr);
-    if (IRREVERSIBILITY_TOKENS.some((t) => `${command} ${subcommand}`.includes(t)))
-      s += 0.5 + flagModifier(flags);
+    const segments = cmdStr.split(/&&|\|\||;/).map((seg) => seg.trim()).filter(Boolean);
+    let maxIrr = 0;
+    for (const seg of segments) {
+      const { command, subcommand, flags } = tokenizeCommand(seg);
+      if (IRREVERSIBILITY_TOKENS.some((t) => `${command} ${subcommand}`.includes(t)))
+        maxIrr = Math.max(maxIrr, 0.5 + flagModifier(flags));
+    }
+    s += maxIrr;
   } else {
     if (IRREVERSIBILITY_TOKENS.some((t) => `${name} ${JSON.stringify(args)}`.toLowerCase().includes(t))) s += 0.5;
   }
@@ -94,7 +99,8 @@ function score(
 ): { blastRadius: number; planConfidence: number; risk: number; decision: "allow" | "interrupt" } {
   const br = blastRadius(toolName, args);
   const pc = planConfidence(toolCallIndexInRun);
-  const risk = br * (1 - pc);
+  const rawRisk = br * (1 - pc);
+  const risk = br >= 0.75 ? Math.max(0.60, rawRisk) : rawRisk;
   return { blastRadius: br, planConfidence: pc, risk, decision: risk >= RISK_THRESHOLD ? "interrupt" : "allow" };
 }
 
