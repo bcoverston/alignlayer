@@ -67,9 +67,10 @@ from typing import Any
 SIMILAR_THRESHOLD     = 0.15
 DISSIMILAR_THRESHOLD  = 0.35
 
-DEFAULT_OUTPUT        = "data/synthetic/pairs-v0.jsonl"
-DEFAULT_SCORES_CACHE  = "data/synthetic/scores-cache.jsonl"
-DEFAULT_N_PER_CAT     = 30     # commands generated per category
+DEFAULT_OUTPUT         = "data/synthetic/pairs-v0.jsonl"
+DEFAULT_SCORES_CACHE   = "data/synthetic/scores-cache.jsonl"
+DEFAULT_COMMANDS_CACHE = "data/synthetic/commands-cache.jsonl"
+DEFAULT_N_PER_CAT      = 30     # commands generated per category
 
 BACKEND               = os.environ.get("ALIGNLAYER_BACKEND", "ollama")
 OLLAMA_URL            = os.environ.get("ALIGNLAYER_OLLAMA_URL", "http://localhost:11434")
@@ -419,6 +420,28 @@ def save_score(path: str, entry: dict[str, Any]) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
+def load_commands_cache(path: str) -> dict[int, list[str]]:
+    """Return {tier: [cmd, ...]} for already-generated categories."""
+    result: dict[int, list[str]] = {}
+    p = Path(path)
+    if not p.exists():
+        return result
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        tier = entry["tier"]
+        result.setdefault(tier, []).extend(entry["commands"])
+    return result
+
+
+def save_commands(path: str, tier: int, commands: list[str]) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps({"tier": tier, "commands": commands}) + "\n")
+
+
 # ---------------------------------------------------------------------------
 # Pair generation
 # ---------------------------------------------------------------------------
@@ -521,8 +544,9 @@ def calibrate(n_sample: int = len(CALIBRATION_COMMANDS)) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate AlignLayer training pairs")
-    ap.add_argument("--output",        default=DEFAULT_OUTPUT)
-    ap.add_argument("--scores-cache",  default=DEFAULT_SCORES_CACHE)
+    ap.add_argument("--output",          default=DEFAULT_OUTPUT)
+    ap.add_argument("--scores-cache",    default=DEFAULT_SCORES_CACHE)
+    ap.add_argument("--commands-cache",  default=DEFAULT_COMMANDS_CACHE)
     ap.add_argument("--n-per-category", type=int, default=DEFAULT_N_PER_CAT,
                     help="Commands to generate per risk category (default: 30)")
     ap.add_argument("--seed",          type=int, default=42)
@@ -544,6 +568,7 @@ def main() -> None:
         calibrate()
 
     cache = load_scores_cache(args.scores_cache)
+    cmd_cache = load_commands_cache(args.commands_cache)
     scored: list[dict[str, Any]] = []
 
     # ── Step 1: Generate commands ──────────────────────────────────────────
@@ -555,25 +580,28 @@ def main() -> None:
         all_commands: list[dict[str, Any]] = []
 
         for cat in GENERATION_CATEGORIES:
-            tier_label = f"tier {cat['tier']}" if cat["tier"] >= 0 else cat["label"]
-            print(f"Generating {args.n_per_category} commands [{tier_label}]...", flush=True)
+            tier = cat["tier"]
+            tier_label = f"tier {tier}" if tier >= 0 else cat["label"]
 
-            if args.dry_run:
-                commands = [f"echo dry-run-{cat['tier']}-{i}" for i in range(args.n_per_category)]
+            # Resume: use cached commands for this tier if available.
+            if tier in cmd_cache:
+                commands = cmd_cache[tier]
+                print(f"  [cached]  {len(commands)} commands [{tier_label}]")
+            elif args.dry_run:
+                commands = [f"echo dry-run-{tier}-{i}" for i in range(args.n_per_category)]
             else:
+                print(f"  Generating {args.n_per_category} commands [{tier_label}]...", flush=True)
                 try:
                     commands = generate_commands_for_category(cat, args.n_per_category)
-                    commands = commands[:args.n_per_category]  # guard against model over-generating
+                    commands = commands[:args.n_per_category]
                 except Exception as exc:
-                    print(f"  ✗ generation failed: {exc} — skipping category")
+                    print(f"  ✗ generation failed: {exc} — skipping")
                     continue
+                save_commands(args.commands_cache, tier, commands)
+                print(f"  ✓ {len(commands)} commands generated + cached")
 
             for cmd in commands:
-                all_commands.append({
-                    "command": cmd,
-                    "expected_tier": cat["tier"],
-                })
-            print(f"  {len(commands)} commands generated")
+                all_commands.append({"command": cmd, "expected_tier": tier})
 
         print(f"\nTotal commands: {len(all_commands)}")
 
