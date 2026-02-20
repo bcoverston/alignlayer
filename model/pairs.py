@@ -478,11 +478,34 @@ CALIBRATION_COMMANDS = [
 
 
 def calibrate(n_sample: int = len(CALIBRATION_COMMANDS)) -> None:
-    """Score a fixed sample with both heuristic and LLM; report disagreements."""
+    """Score a fixed sample with both heuristic and LLM; report disagreements.
+
+    All LLM calls run concurrently (up to LLM_CONCURRENCY) for speed.
+    """
     sample = CALIBRATION_COMMANDS[:n_sample]
     print(f"\n{'═'*90}")
-    print(f"Calibration — {len(sample)} commands, heuristic vs LLM")
+    print(f"Calibration — {len(sample)} commands, heuristic vs LLM ({LLM_CONCURRENCY} concurrent)")
     print(f"{'═'*90}")
+
+    # Score all commands concurrently.
+    results: dict[str, dict[str, Any]] = {}
+    errors:  dict[str, str] = {}
+    _lock = threading.Lock()
+
+    def _score(item: tuple[int, str]) -> None:
+        tier, cmd = item
+        try:
+            r = score_command(cmd, tier)
+            with _lock:
+                results[cmd] = r
+        except Exception as exc:
+            with _lock:
+                errors[cmd] = str(exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=LLM_CONCURRENCY) as pool:
+        list(pool.map(_score, sample))
+
+    # Print in original order.
     print(f"{'Command':<52} {'exp':>3} {'h':>5} {'llm':>5} {'Δ':>5}  verdict")
     print(f"{'─'*90}")
 
@@ -490,28 +513,23 @@ def calibrate(n_sample: int = len(CALIBRATION_COMMANDS)) -> None:
     disagree: list[tuple[str, float, float]] = []
 
     for expected_tier, cmd in sample:
-        try:
-            result = score_command(cmd, expected_tier)  # always LLM in calibrate
-            h_blast  = result["heuristic_blast"]
-            llm_risk = result["risk"]
-        except Exception as exc:
-            print(f"  {'LLM error':52} — {exc}")
+        if cmd in errors:
+            print(f"  {cmd[:50]:<52} ✗ {errors[cmd][:30]}")
             continue
-
-        delta = abs(h_blast - llm_risk)
-        verdict = "✓ agree" if delta < 0.2 else "⚠ differ"
+        result   = results[cmd]
+        h_blast  = result["heuristic_blast"]
+        llm_risk = result["risk"]
+        delta    = abs(h_blast - llm_risk)
+        verdict  = "✓ agree" if delta < 0.2 else "⚠ differ"
         if delta < 0.2:
             agree += 1
         else:
             disagree.append((cmd, h_blast, llm_risk))
-
-        print(
-            f"  {cmd[:50]:<52} {expected_tier:>3} {h_blast:>5.2f} {llm_risk:>5.2f} {delta:>5.2f}  {verdict}"
-        )
+        print(f"  {cmd[:50]:<52} {expected_tier:>3} {h_blast:>5.2f} {llm_risk:>5.2f} {delta:>5.2f}  {verdict}")
 
     total = agree + len(disagree)
     print(f"{'─'*90}")
-    print(f"Agreement: {agree}/{total} ({100*agree/total:.0f}%)")
+    print(f"Agreement: {agree}/{total} ({100*agree/total:.0f}%)" if total else "No results.")
     if disagree:
         print("\nLargest disagreements:")
         for cmd, h, l in sorted(disagree, key=lambda x: abs(x[1]-x[2]), reverse=True)[:5]:
