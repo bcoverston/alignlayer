@@ -1,0 +1,4 @@
+data/traces/
+node_modules/
+dist/
+*.js.map

@@ -1,0 +1,13 @@
+{
+  "name": "alignlayer",
+  "version": "0.1.0",
+  "description": "Runtime preference alignment layer for agentic systems",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.33",
+    "typescript": "^5.9.3"
+  }
+}
