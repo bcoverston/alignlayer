@@ -217,6 +217,102 @@ Automate the eval pipeline and improve scenario coverage so Round 2 results are 
 | Worst single miss (delta) | -6 | <= |3| |
 | Regression set (71 Round 1 misses) | 0/71 | >= 55/71 |
 
+---
+
+## Live Data Findings — Round 3 Planning
+
+*Updated after first real deployment trace (2026-02-22, 613 tool calls, 89 interrupts).*
+
+### What the traces revealed
+
+**Heuristic is working as a data collection layer.** Blast radius differentiation is meaningful:
+`rm -rf` (1.00) > `git push --force` (0.95) > `docker push` (0.75). SSH read vs SSH write
+discrimination is correct. But 75%+ of the 89 interrupts are false positives — at that noise
+rate, a human reviewer will tune out the queue. The interrupt threshold may need to raise to
+~0.70 for the heuristic while we collect data.
+
+**Main FP sources:**
+1. **Heredoc content scanning** — `cat << 'EOF' > file` containing `push`/`delete` tokens inside
+   the script body scores 1.00. The heuristic scans all text, not just the command being executed.
+2. **Non-bash tools scored incorrectly** — `Write`, `Task`, `Edit` flagged at 0.75.
+   `Write` to `/tmp/plan.md` is not equivalent to `rm -rf`.
+3. **`git push --force` under-scored** — scored 0.60 by the heuristic (below T4 threshold).
+   The ML model scores it correctly.
+
+### Execution surface gaps
+
+**Node/REPL gap (quick fix):**
+Node commands run through an execution surface not in `EXEC_TOOLS`. Fix:
+```typescript
+const EXEC_TOOLS = new Set(["exec", "bash", "shell", "run", "computer", "node", "repl"]);
+```
+Any new execution surface added to the agent is a blind spot until explicitly mapped.
+Posture question: **default-intercept unknown tools, not default-allow**.
+
+**MCP tools — highest priority gap:**
+MCP tools are dynamically registered at runtime. The scorer has no static list to match against.
+Tool names are arbitrary (`stripe_create_charge`, `github_delete_repo`, `postgres_execute_query`).
+The heuristic completely fails — `stripe_refund_all_charges` looks identical to any other tool call.
+
+Two-layer fix:
+1. **Unknown tool → ML scorer.** When tool name isn't in `EXEC_TOOLS`, run tool name + serialized
+   args JSON through the ML scorer. Unknown tools get ML scoring by default, not heuristic.
+2. **MCP server trust level.** Tools from unverified/remote MCP servers get a base risk uplift.
+   The server manifest (name, URL, local vs remote) is a signal the scorer currently ignores.
+
+### Corpus expansion: MCP registry mining
+
+MCP tool registries (Smithery, MCP Hub, official Anthropic MCP servers) publish tool schemas
+with names, descriptions, and parameter specs. These are a rich source of labeled training data:
+
+- Read-only MCP tools: `github_get_file`, `stripe_retrieve_customer`, `postgres_select` → T0
+- Write MCP tools: `github_create_pr`, `stripe_create_charge`, `postgres_insert` → T3
+- Destructive MCP tools: `github_delete_repo`, `stripe_refund_all`, `postgres_drop_table` → T4
+
+Spawn Haiku agents to enumerate top MCP servers (GitHub, Stripe, Postgres, Slack, Linear,
+Notion, filesystem) and generate 50-100 representative tool calls per server with correct
+tier/risk labels. Target: 500+ MCP tool call examples in corpus before next training run.
+
+### Tool discrimination beyond bash (Phase 3.5)
+
+The risk model needs tool-specific scorers for the full agent tool surface:
+
+| Tool | Current handling | Needed |
+|------|-----------------|--------|
+| Bash/shell | Heuristic + ML | Already good |
+| Write | Scored as high-risk (wrong) | File path sensitivity: `/etc/` T3, `/tmp/` T1 |
+| Read | Passes through (correct) | Keep |
+| Task | Scored as 0.75 (wrong) | Prompt content analysis → ML scorer |
+| WebFetch | Flagged via boundary token | URL sensitivity: internal T0, external T1, unknown T2 |
+| Edit | Scored as 0.75 (wrong) | Similar to Write |
+| MCP tools | Not scored (blind spot) | ML scorer on tool name + args |
+
+### Critical path: Phase 1 (approval UX)
+
+The training flywheel requires human corrections. Without an approval UX:
+- Interrupt queue fills with FPs and gets ignored
+- `human_outcome` stays null in every trace entry
+- No labeled correction pairs → no preference refinement
+
+Phase 1 (exec-approvals socket integration) is now the **highest-leverage product work**
+after v5 eval. The ML model is good enough to deploy; the correction loop is what makes
+it better over time.
+
+**Minimum viable approval loop:**
+1. Wire `pending-interrupts.jsonl` to a simple CLI review tool: `alignlayer review`
+2. Human marks each as `approved` / `denied` / `allow-always`
+3. Corrections ingest as labeled pairs → next training round
+
+### Round 3 targets
+
+| Metric | v4 | v5 (expected) | Round 3 target |
+|--------|-----|---------------|----------------|
+| Overall accuracy | 87.5% | ~90%+ | >= 93% |
+| T-2 accuracy | 0% | TBD | >= 70% |
+| FN rate T3+T4 | 17.3% | TBD | <= 10% |
+| MCP tool coverage | 0 examples | 0 examples | 500+ examples |
+| Production FP rate | ~75% of interrupts | TBD | <= 30% |
+
 ## Risks and Mitigations
 
 **1. Corpus quality -- LLM mislabeling propagates into training data.**
