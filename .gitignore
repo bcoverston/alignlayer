@@ -3,3 +3,11 @@ node_modules/
 dist/
 *.js.map
 model/.venv/
+model/__pycache__/
+
+# Large generated data — regenerate with `make pairs`
+data/synthetic/pairs-*.jsonl
+data/synthetic/commands-cache.jsonl
+
+# Corpus cache — large, regenerate with pairs.py pipeline
+data/synthetic/scores-cache.jsonl

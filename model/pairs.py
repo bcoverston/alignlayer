@@ -265,13 +265,18 @@ def generate_commands_for_category(category: dict[str, Any], n: int) -> list[str
     )
     raw = _ollama_complete(GENERATION_SYSTEM, prompt)
     raw = raw.strip()
-    # Strip markdown fences if present
+    # Strip markdown fences
     if raw.startswith("```"):
         raw = "\n".join(raw.split("\n")[1:])
     if raw.endswith("```"):
         raw = "\n".join(raw.split("\n")[:-1])
     raw = raw.strip()
-    commands = json.loads(raw)
+    try:
+        commands = json.loads(raw)
+    except json.JSONDecodeError:
+        # Model sometimes emits a truncated or slightly malformed array.
+        # Extract all quoted strings as a best-effort fallback.
+        commands = re.findall(r'"((?:[^"\\]|\\.)+)"', raw)
     if not isinstance(commands, list):
         raise ValueError(f"Expected list, got {type(commands)}")
     return [str(c) for c in commands if c]
@@ -446,30 +451,96 @@ def save_commands(path: str, tier: int, commands: list[str]) -> None:
 # Pair generation
 # ---------------------------------------------------------------------------
 
-def make_pairs(scored: list[dict[str, Any]], *, rng: random.Random) -> list[dict[str, Any]]:
+# Tier pairs where adjacent-tier dissimilarity should be explicitly enforced.
+# Risk scores overlap too much at these boundaries for delta-only labeling to work.
+# Only boundaries where risk scores genuinely overlap (gray zone) but tiers are
+# semantically distinct.  T-1↔T0 is excluded: both are low-risk so the similar
+# label is correct — the model shouldn't try to distinguish them by embedding.
+FORCED_DISSIMILAR_BOUNDARIES: set[frozenset[int]] = {
+    frozenset({2, 3}),
+    frozenset({3, 4}),
+}
+
+
+def _pair_entry(pair_id: int, a: dict, b: dict, label: int, similar: bool,
+                now: str) -> dict:
+    delta = round(abs(a["risk"] - b["risk"]), 4)
+    return {
+        "id":       f"pair-{pair_id:06d}",
+        "action_a": {k: a[k] for k in ("id", "tool", "args", "text", "risk", "tier", "reasoning", "flags")},
+        "action_b": {k: b[k] for k in ("id", "tool", "args", "text", "risk", "tier", "reasoning", "flags")},
+        "delta":    delta,
+        "label":    label,
+        "similar":  similar,
+        "generated_at": now,
+    }
+
+
+def make_pairs(
+    scored: list[dict[str, Any]],
+    *,
+    rng: random.Random,
+    max_pairs: int | None = None,
+    boundary_pairs: int = 0,
+) -> list[dict[str, Any]]:
+    """Sample up to *max_pairs* qualifying pairs without materialising all combos.
+
+    Strategy: shuffle indices, then walk combinations in that order until the
+    cap is reached.  Memory: O(n) for the index array rather than O(n²).
+
+    boundary_pairs: additionally generate this many explicit cross-tier pairs
+    per FORCED_DISSIMILAR_BOUNDARIES boundary (labeled dissimilar regardless of delta).
+    These are appended first so the cap budget is shared.
+    """
     pairs: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc).isoformat()
-    all_combos = list(combinations(scored, 2))
-    rng.shuffle(all_combos)
+    pair_id = 0
 
-    for i, (a, b) in enumerate(all_combos):
-        delta = abs(a["risk"] - b["risk"])
-        if delta < SIMILAR_THRESHOLD:
-            label, similar = 0, True
-        elif delta > DISSIMILAR_THRESHOLD:
-            label, similar = 1, False
-        else:
-            continue
+    # ── Phase 1: Explicit boundary pairs ───────────────────────────────────
+    if boundary_pairs > 0:
+        by_tier: dict[int, list[dict]] = {}
+        for entry in scored:
+            t = entry.get("tier")
+            if t is not None:
+                by_tier.setdefault(t, []).append(entry)
+        for tiers in FORCED_DISSIMILAR_BOUNDARIES:
+            ta, tb = sorted(tiers)
+            pool_a = by_tier.get(ta, [])
+            pool_b = by_tier.get(tb, [])
+            if not pool_a or not pool_b:
+                continue
+            rng.shuffle(pool_a)
+            rng.shuffle(pool_b)
+            n = min(boundary_pairs, len(pool_a), len(pool_b))
+            for i in range(n):
+                if max_pairs is not None and len(pairs) >= max_pairs:
+                    break
+                pairs.append(_pair_entry(pair_id, pool_a[i], pool_b[i], 1, False, now))
+                pair_id += 1
+            print(f"  boundary {ta}↔{tb}: {n} forced-dissimilar pairs added")
 
-        pairs.append({
-            "id":       f"pair-{i:05d}",
-            "action_a": {k: a[k] for k in ("id", "tool", "args", "text", "risk", "tier", "reasoning", "flags")},
-            "action_b": {k: b[k] for k in ("id", "tool", "args", "text", "risk", "tier", "reasoning", "flags")},
-            "delta":    round(delta, 4),
-            "label":    label,
-            "similar":  similar,
-            "generated_at": now,
-        })
+    # ── Phase 2: Risk-delta-based pairs ───────────────────────────────────
+    idx = list(range(len(scored)))
+    rng.shuffle(idx)
+
+    for ii in range(len(idx)):
+        if max_pairs is not None and len(pairs) >= max_pairs:
+            break
+        a = scored[idx[ii]]
+        for jj in range(ii + 1, len(idx)):
+            if max_pairs is not None and len(pairs) >= max_pairs:
+                break
+            b = scored[idx[jj]]
+            delta = abs(a["risk"] - b["risk"])
+            if delta < SIMILAR_THRESHOLD:
+                label, similar = 0, True
+            elif delta > DISSIMILAR_THRESHOLD:
+                label, similar = 1, False
+            else:
+                continue
+
+            pairs.append(_pair_entry(pair_id, a, b, label, similar, now))
+            pair_id += 1
 
     return pairs
 
@@ -558,6 +629,10 @@ def main() -> None:
                     help="Run heuristic-vs-LLM calibration check before corpus generation")
     ap.add_argument("--heuristic-only", action="store_true",
                     help="Use heuristic scorer only — no LLM calls (offline/speed testing)")
+    ap.add_argument("--max-pairs", type=int, default=None,
+                    help="Cap total output pairs (default: unlimited). Use e.g. 2000000 to avoid 30GB files.")
+    ap.add_argument("--boundary-pairs", type=int, default=0,
+                    help="Forced dissimilar pairs per weak boundary (T-1↔T0, T2↔T3, T3↔T4). Default: 0.")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -657,8 +732,10 @@ def main() -> None:
                     scored.append(entry)
 
     # ── Step 3: Generate pairs ─────────────────────────────────────────────
-    print(f"\nGenerating pairs from {len(scored)} scored commands...")
-    pairs = make_pairs(scored, rng=rng)
+    cap_msg = f" (cap={args.max_pairs:,})" if args.max_pairs else ""
+    print(f"\nGenerating pairs from {len(scored)} scored commands{cap_msg}...")
+    pairs = make_pairs(scored, rng=rng, max_pairs=args.max_pairs,
+                       boundary_pairs=args.boundary_pairs)
 
     similar_count    = sum(1 for p in pairs if p["similar"])
     dissimilar_count = len(pairs) - similar_count
@@ -688,7 +765,7 @@ def main() -> None:
             tier_counts[s["tier"]] = tier_counts.get(s["tier"], 0) + 1
             sc = s.get("scorer", "?")
             scorer_counts[sc] = scorer_counts.get(sc, 0) + 1
-        print("  Tier distribution:", " | ".join(f"T{t}={c}" for t, c in sorted(tier_counts.items())))
+        print("  Tier distribution:", " | ".join(f"T{t}={c}" for t, c in sorted((t, c) for t, c in tier_counts.items() if t is not None)))
         print("  Scorer breakdown: ", " | ".join(f"{k}={v}" for k, v in sorted(scorer_counts.items())))
 
 
