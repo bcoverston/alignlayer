@@ -615,8 +615,8 @@ def calibrate(n_sample: int = len(CALIBRATION_COMMANDS)) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate AlignLayer training pairs")
-    ap.add_argument("--output",          default=DEFAULT_OUTPUT)
-    ap.add_argument("--scores-cache",    default=DEFAULT_SCORES_CACHE)
+    ap.add_argument("--output", "--out", default=DEFAULT_OUTPUT)
+    ap.add_argument("--scores-cache", "--corpus", default=DEFAULT_SCORES_CACHE)
     ap.add_argument("--commands-cache",  default=DEFAULT_COMMANDS_CACHE)
     ap.add_argument("--n-per-category", type=int, default=DEFAULT_N_PER_CAT,
                     help="Commands to generate per risk category (default: 30)")
