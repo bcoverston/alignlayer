@@ -49,7 +49,64 @@ const BOUNDARY_TOKENS = [
 ];
 
 // Tool names treated as high-capability execution surfaces (can do anything).
-const EXEC_TOOLS = new Set(["exec", "bash", "shell", "run", "computer"]);
+const EXEC_TOOLS = new Set(["exec", "bash", "shell", "run", "computer", "node", "repl"]);
+
+// ---------------------------------------------------------------------------
+// CLI verb table
+//
+// Deterministic (tool, verb-pattern) → blast floor or cap, checked before the
+// generic heuristic. Floors guarantee a minimum blast for known-dangerous verbs;
+// caps prevent over-firing on known-safe read ops.
+// ---------------------------------------------------------------------------
+
+interface VerbEntry {
+  tool: string;         // exact match on base command
+  verb: RegExp;         // matched against first positional arg (subcommand)
+  blast: number;        // blast radius value to apply
+  cap: boolean;         // true → cap (max), false → floor (min)
+}
+
+const CLI_VERB_TABLE: VerbEntry[] = [
+  // Terraform
+  { tool: "terraform", verb: /^destroy$/,                                           blast: 0.90, cap: false },
+  { tool: "terraform", verb: /^apply$/,                                             blast: 0.80, cap: false },
+  { tool: "terraform", verb: /^plan$/,                                              blast: 0.05, cap: true  }, // dry-run
+  { tool: "terraform", verb: /^(show|output|validate|fmt|graph|version|workspace|state|providers)$/, blast: 0.05, cap: true },
+
+  // Redis — verb is the Redis command (first non-flag positional after the tool)
+  { tool: "redis-cli", verb: /^(flushdb|flushall)$/i,                              blast: 0.50, cap: false },
+  { tool: "redis-cli", verb: /^(del|unlink|expire|persist|rename|move)$/i,         blast: 0.40, cap: false },
+  { tool: "redis-cli", verb: /^(get|keys|scan|info|dbsize|ttl|type|llen|smembers|hgetall|zrange|config\s+get|ping|echo|debug\s+object)$/i, blast: 0.05, cap: true },
+
+  // AWS — verb matched against the full remaining command (service + operation)
+  { tool: "aws", verb: /terminate-instances|stop-instances|delete-|deregister-|remove-|revoke-|disable-|detach-/, blast: 0.65, cap: false },
+  { tool: "aws", verb: /describe-|list-|get-|show-|read-/,                         blast: 0.05, cap: true },
+
+  // kubectl
+  { tool: "kubectl", verb: /^delete$/,                                              blast: 0.65, cap: false },
+  { tool: "kubectl", verb: /^(get|describe|logs?|top|explain|diff|version|cluster-info|auth|rollout\s+status|config\s+view)$/, blast: 0.05, cap: true },
+
+  // git
+  { tool: "git", verb: /^push$/,                                                   blast: 0.65, cap: false },
+
+  // npm / yarn / pnpm publish
+  { tool: "npm",  verb: /^(publish|unpublish|deprecate)$/,                         blast: 0.70, cap: false },
+  { tool: "yarn", verb: /^publish$/,                                                blast: 0.70, cap: false },
+  { tool: "pnpm", verb: /^publish$/,                                                blast: 0.70, cap: false },
+];
+
+// ---------------------------------------------------------------------------
+// Opaque execution detection
+//
+// Commands that delegate to an interpreter inline hide their real intent.
+// Flag these for elevated blast radius as an alignment signal — the agent
+// should rarely need to wrap logic in `python3 -c` for routine tasks.
+// ---------------------------------------------------------------------------
+
+const OPAQUE_EXEC_RE = /(?:python3?|node|perl|ruby|bash|sh)\s+-[ce]\s+|(?<![a-z])eval\s+[\$'"`(]|\|\s*(?:bash|sh)\b|base64\s+-d\s*\|/i;
+
+/** Minimum blast radius for opaque interpreter invocations (T2 territory). */
+const OPAQUE_EXEC_BLAST_FLOOR = 0.45;
 
 // Flags that amplify blast radius when an irreversibility token is already matched.
 const FORCE_FLAGS     = new Set(["-f", "--force", "--hard", "--no-backup", "--overwrite", "--delete"]);
@@ -108,6 +165,45 @@ function tokenizeCommand(cmd: string): Tokens {
   return { command, subcommand: (positional[0] ?? "").toLowerCase(), flags };
 }
 
+// ---------------------------------------------------------------------------
+// CLI verb table lookup
+// ---------------------------------------------------------------------------
+
+/**
+ * Return a blast radius value from the CLI_VERB_TABLE if the command matches,
+ * or null if no entry applies.
+ *
+ * Caps and floors are both returned here; the caller decides how to apply them.
+ */
+function lookupVerbTable(
+  command: string,
+  fullCmd: string
+): { blast: number; cap: boolean } | null {
+  // The "verb" for multi-word CLIs (e.g. aws, kubectl) is everything after the
+  // base command — we match the verb pattern against that whole remainder.
+  const remainder = fullCmd.trim().slice(command.length).trim().toLowerCase();
+  const firstPositional = remainder.split(/\s+/).find((p) => !p.startsWith("-")) ?? "";
+
+  for (const entry of CLI_VERB_TABLE) {
+    if (entry.tool !== command) continue;
+    const target = entry.tool === "aws" || entry.tool === "kubectl"
+      ? remainder  // match against full remainder for multi-word verbs
+      : firstPositional;
+    if (entry.verb.test(target)) return { blast: entry.blast, cap: entry.cap };
+  }
+  return null;
+}
+
+/**
+ * Extract the command string embedded in an SSH invocation, if present.
+ * e.g. `ssh -i key.pem user@host 'rm -rf /tmp/x'` → `rm -rf /tmp/x`
+ */
+function extractSshInner(cmd: string): string | null {
+  // Capture single- or double-quoted trailing arg after the host
+  const m = cmd.match(/^ssh\b.*?\s+(?:[^\s'"]+)\s+['"](.+)['"]\s*$/s);
+  return m ? m[1] : null;
+}
+
 /**
  * Flag-based modifier applied when an irreversibility token is matched.
  * Amplifiers push the score up; safety valves (dry-run, interactive) pull it down.
@@ -147,18 +243,53 @@ export function blastRadius(
   if (EXEC_TOOLS.has(name)) s += 0.25; // baseline: exec surface
 
   if (cmdStr) {
+    // Opaque execution: interpreter wrapping hides intent — apply a blast floor.
+    if (OPAQUE_EXEC_RE.test(cmdStr)) {
+      s = Math.max(s, OPAQUE_EXEC_BLAST_FLOOR);
+    }
+
     // Split on shell chain operators — score each segment, take the max.
-    // Prevents `cd /tmp && rm -rf /` from masking the dangerous second command.
+    // Prevents `cd /tmp && rm -rf /` from masking a dangerous second command.
     const segments = cmdStr.split(/&&|\|\||;/).map((seg) => seg.trim()).filter(Boolean);
-    let maxIrreversibility = 0;
+    let maxSegBlast = 0;
+
     for (const seg of segments) {
       const { command, subcommand, flags } = tokenizeCommand(seg);
+
+      // SSH with a quoted inner command: score the inner command instead of the
+      // ssh invocation itself, so `ssh host 'rm -rf /tmp'` reflects the inner op.
+      if (command === "ssh") {
+        const inner = extractSshInner(seg);
+        if (inner) {
+          const innerScore = blastRadius("bash", { command: inner });
+          maxSegBlast = Math.max(maxSegBlast, innerScore - 0.25); // subtract exec baseline already counted
+          continue;
+        }
+      }
+
+      // CLI verb table: check for known (tool, verb) pairs before generic tokens.
+      const verbMatch = lookupVerbTable(command, seg);
+      if (verbMatch !== null) {
+        if (verbMatch.cap) {
+          // Known-safe: cap this segment's contribution
+          maxSegBlast = Math.max(maxSegBlast, 0); // contributes nothing beyond baseline
+          continue;
+        } else {
+          // Known-risky: floor at the table value, still apply flag modifiers
+          const floored = Math.max(verbMatch.blast, verbMatch.blast + flagModifier(flags));
+          maxSegBlast = Math.max(maxSegBlast, floored - 0.25); // subtract exec baseline
+          continue;
+        }
+      }
+
+      // Generic irreversibility token scan (fallback for unknown CLIs)
       const cmdSpace = `${command} ${subcommand}`;
       if (IRREVERSIBILITY_TOKENS.some((t) => cmdSpace.includes(t))) {
-        maxIrreversibility = Math.max(maxIrreversibility, 0.5 + flagModifier(flags));
+        maxSegBlast = Math.max(maxSegBlast, 0.5 + flagModifier(flags));
       }
     }
-    s += maxIrreversibility;
+
+    s += maxSegBlast;
   } else {
     // Non-exec tool: check serialized args for irreversibility signals.
     const searchable = `${name} ${JSON.stringify(args)}`.toLowerCase();

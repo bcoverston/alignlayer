@@ -165,8 +165,14 @@ def weighted_contrastive_loss(
 class PairDataset(Dataset):
     """Streams pairs from pairs-v*.jsonl. Loads all into memory (pairs are small)."""
 
-    def __init__(self, path: str, max_pairs: int | None = None):
-        self.pairs: list[tuple[str, str, int, int, int]] = []  # (cmd_a, cmd_b, label, tier_a, tier_b)
+    def __init__(
+        self,
+        path: str,
+        max_pairs: int | None = None,
+        vocab: dict[str, int] | None = None,
+    ):
+        self.vocab = vocab  # None → char-only mode; dict → hybrid mode
+        self.pairs: list[tuple[str, str, int, int, int]] = []
         with open(path) as f:
             for i, line in enumerate(f):
                 if max_pairs and i >= max_pairs:
@@ -192,13 +198,16 @@ class PairDataset(Dataset):
 
     def __getitem__(self, idx: int):
         a, b, label, tier_a, tier_b = self.pairs[idx]
-        return (
-            encode(a),
-            encode(b),
-            torch.tensor(label,  dtype=torch.float32),
-            torch.tensor(tier_a, dtype=torch.long),
-            torch.tensor(tier_b, dtype=torch.long),
-        )
+        char_a = encode(a)
+        char_b = encode(b)
+        t_label  = torch.tensor(label,  dtype=torch.float32)
+        t_tier_a = torch.tensor(tier_a, dtype=torch.long)
+        t_tier_b = torch.tensor(tier_b, dtype=torch.long)
+        if self.vocab is not None:
+            return (char_a, tokenize_word(a, self.vocab),
+                    char_b, tokenize_word(b, self.vocab),
+                    t_label, t_tier_a, t_tier_b)
+        return (char_a, char_b, t_label, t_tier_a, t_tier_b)
 
 
 # ---------------------------------------------------------------------------
@@ -217,12 +226,32 @@ def train(
     val_frac: float = 0.05,
     max_pairs: int | None = None,
     device: str | None = None,
+    hybrid: bool = False,
+    corpus_path: str | None = None,
 ):
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"Device: {dev}")
 
+    # Build word vocab from corpus if hybrid mode requested
+    vocab: dict[str, int] | None = None
+    if hybrid:
+        if not corpus_path:
+            raise ValueError("--corpus required for --hybrid training")
+        print("Building word vocab from corpus...", end=" ", flush=True)
+        commands: list[str] = []
+        with open(corpus_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        commands.append(json.loads(line)["text"])
+                    except Exception:
+                        pass
+        vocab = build_word_vocab(commands)
+        print(f"{len(vocab):,} tokens")
+
     print("Loading pairs...", end=" ", flush=True)
-    dataset = PairDataset(pairs_path, max_pairs=max_pairs)
+    dataset = PairDataset(pairs_path, max_pairs=max_pairs, vocab=vocab)
     print(f"{len(dataset):,} pairs loaded")
 
     # Train/val split
@@ -237,7 +266,12 @@ def train(
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=nw, pin_memory=pm)
     val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=nw, pin_memory=pm)
 
-    model = CommandEncoder().to(dev)
+    model: CommandEncoder | HybridEncoder
+    if hybrid and vocab is not None:
+        model = HybridEncoder(vocab_size=len(vocab)).to(dev)
+        model._vocab = vocab
+    else:
+        model = CommandEncoder().to(dev)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {n_params:,}")
 
@@ -247,16 +281,29 @@ def train(
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     best_val = float("inf")
 
+    def _forward(batch) -> tuple[torch.Tensor, torch.Tensor]:
+        if hybrid and vocab is not None:
+            char_a, word_a, char_b, word_b, labels, ta, tb = batch
+            char_a, word_a = char_a.to(dev), word_a.to(dev)
+            char_b, word_b = char_b.to(dev), word_b.to(dev)
+            labels, ta, tb = labels.to(dev), ta.to(dev), tb.to(dev)
+            emb_a = model(char_a, word_a)  # type: ignore[arg-type]
+            emb_b = model(char_b, word_b)  # type: ignore[arg-type]
+        else:
+            xa, xb, labels, ta, tb = batch
+            xa, xb, labels = xa.to(dev), xb.to(dev), labels.to(dev)
+            ta, tb = ta.to(dev), tb.to(dev)
+            emb_a = model(xa)  # type: ignore[arg-type]
+            emb_b = model(xb)  # type: ignore[arg-type]
+        return emb_a, emb_b, labels, ta, tb  # type: ignore[return-value]
+
     for epoch in range(1, epochs + 1):
         # --- train ---
         model.train()
         t0 = time.time()
         train_loss = 0.0
-        for xa, xb, labels, ta, tb in train_dl:
-            xa, xb, labels = xa.to(dev), xb.to(dev), labels.to(dev)
-            ta, tb = ta.to(dev), tb.to(dev)
-            emb_a = model(xa)
-            emb_b = model(xb)
+        for batch in train_dl:
+            emb_a, emb_b, labels, ta, tb = _forward(batch)
             loss = weighted_contrastive_loss(emb_a, emb_b, labels, ta, tb)
             optimizer.zero_grad()
             loss.backward()
@@ -270,11 +317,8 @@ def train(
         model.eval()
         val_loss = correct = total = 0
         with torch.no_grad():
-            for xa, xb, labels, ta, tb in val_dl:
-                xa, xb, labels = xa.to(dev), xb.to(dev), labels.to(dev)
-                ta, tb = ta.to(dev), tb.to(dev)
-                emb_a = model(xa)
-                emb_b = model(xb)
+            for batch in val_dl:
+                emb_a, emb_b, labels, ta, tb = _forward(batch)
                 val_loss += weighted_contrastive_loss(emb_a, emb_b, labels, ta, tb).item()
                 d = torch.norm(emb_a - emb_b, dim=1)
                 pred = (d > MARGIN / 2).float()
@@ -289,7 +333,10 @@ def train(
         if val_loss < best_val:
             best_val = val_loss
             ckpt = CHECKPOINT_DIR / "best.pt"
-            torch.save({"epoch": epoch, "model": model.state_dict(), "val_loss": val_loss, "acc": acc}, ckpt)
+            ckpt_dict: dict = {"epoch": epoch, "model": model.state_dict(), "val_loss": val_loss, "acc": acc}
+            if hybrid and vocab is not None:
+                ckpt_dict["vocab"] = vocab
+            torch.save(ckpt_dict, ckpt)
             print(f"  ✓ checkpoint saved ({ckpt})")
 
     print(f"\nTraining complete. Best val loss: {best_val:.4f}")
@@ -300,30 +347,46 @@ def train(
 # Inference helpers
 # ---------------------------------------------------------------------------
 
-def load_model(checkpoint: str, device: str | None = None) -> tuple[CommandEncoder, torch.device]:
+def load_model(
+    checkpoint: str, device: str | None = None
+) -> tuple[CommandEncoder | HybridEncoder, torch.device]:
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"))
-    state = torch.load(checkpoint, map_location=dev, weights_only=True)
+    state = torch.load(checkpoint, map_location=dev, weights_only=False)
     sd = state["model"]
-    # Detect architecture from checkpoint: norm.weight shape = FILTERS * n_kernels
-    cnn_out = sd["norm.weight"].shape[0]
-    n_kernels = cnn_out // CommandEncoder.FILTERS
-    all_kernels = [3, 5, 7, 11, 16, 21]
-    kernels = all_kernels[:n_kernels]
-    model = CommandEncoder(kernels=kernels).to(dev)
-    model.load_state_dict(sd)
+
+    if "vocab" in state:
+        # HybridEncoder checkpoint
+        vocab = state["vocab"]
+        model: CommandEncoder | HybridEncoder = HybridEncoder(vocab_size=len(vocab)).to(dev)
+        model.load_state_dict(sd)
+        model._vocab = vocab  # type: ignore[union-attr]
+    else:
+        # Legacy char-only checkpoint — detect kernel count from norm.weight
+        cnn_out = sd["norm.weight"].shape[0]
+        n_kernels = cnn_out // CommandEncoder.FILTERS
+        kernels = [3, 5, 7, 11, 16, 21][:n_kernels]
+        model = CommandEncoder(kernels=kernels).to(dev)
+        model.load_state_dict(sd)
+
     model.eval()
     return model, dev
 
 
-def embed_command(cmd: str, model: CommandEncoder, dev: torch.device) -> torch.Tensor:
-    x = encode(cmd).unsqueeze(0).to(dev)
+def embed_command(
+    cmd: str, model: CommandEncoder | HybridEncoder, dev: torch.device
+) -> torch.Tensor:
     with torch.no_grad():
+        if isinstance(model, HybridEncoder):
+            char_ids = encode(cmd).unsqueeze(0).to(dev)
+            word_ids = tokenize_word(cmd, model._vocab).unsqueeze(0).to(dev)
+            return model(char_ids, word_ids).squeeze(0).cpu()
+        x = encode(cmd).unsqueeze(0).to(dev)
         return model(x).squeeze(0).cpu()
 
 
 def build_reference_index(
     scores_cache: str,
-    model: CommandEncoder,
+    model: CommandEncoder | HybridEncoder,
     dev: torch.device,
     batch_size: int = 256,
 ) -> tuple[torch.Tensor, list[dict]]:
@@ -342,15 +405,130 @@ def build_reference_index(
             except Exception:
                 pass
 
+    is_hybrid = isinstance(model, HybridEncoder)
     all_embs = []
     for i in range(0, len(entries), batch_size):
         batch = entries[i : i + batch_size]
-        x = torch.stack([encode(e["text"]) for e in batch]).to(dev)
         with torch.no_grad():
-            embs = model(x).cpu()
+            if is_hybrid:
+                char_x = torch.stack([encode(e["text"]) for e in batch]).to(dev)
+                word_x = torch.stack([tokenize_word(e["text"], model._vocab) for e in batch]).to(dev)  # type: ignore[union-attr]
+                embs = model(char_x, word_x).cpu()
+            else:
+                x = torch.stack([encode(e["text"]) for e in batch]).to(dev)
+                embs = model(x).cpu()
         all_embs.append(embs)
 
     return torch.cat(all_embs, dim=0), entries
+
+
+# ---------------------------------------------------------------------------
+# Word-level vocabulary and tokenizer
+# ---------------------------------------------------------------------------
+
+WORD_MAX_LEN = 32       # max tokens per command for word branch
+_WORD_PAD = 0
+_WORD_OOV = 1
+_WORD_RESERVED = 2      # first real token index
+
+
+def build_word_vocab(commands: list[str], max_size: int = 4096) -> dict[str, int]:
+    """Build token vocabulary from command strings. 0=pad, 1=OOV, 2+=tokens."""
+    from collections import Counter
+    counter: Counter[str] = Counter()
+    for cmd in commands:
+        for tok in cmd.strip().split():
+            counter[tok.lower()] += 1
+    vocab: dict[str, int] = {"<PAD>": _WORD_PAD, "<OOV>": _WORD_OOV}
+    for tok, _ in counter.most_common(max_size):
+        vocab[tok] = len(vocab)
+    return vocab
+
+
+def tokenize_word(cmd: str, vocab: dict[str, int]) -> torch.Tensor:
+    """Tokenize command into word-level IDs (pad/truncate to WORD_MAX_LEN)."""
+    tokens = cmd.strip().split()[:WORD_MAX_LEN]
+    ids = [vocab.get(t.lower(), _WORD_OOV) for t in tokens]
+    ids += [_WORD_PAD] * (WORD_MAX_LEN - len(ids))
+    return torch.tensor(ids, dtype=torch.long)
+
+
+# ---------------------------------------------------------------------------
+# Word-level CNN branch
+# ---------------------------------------------------------------------------
+
+class WordBranch(nn.Module):
+    """
+    Token-level CNN encoder branch.
+
+    word tokens (each → embed dim 32)
+    → parallel 1D convs with kernels [2, 3, 4] (each → 32 filters)
+    → ReLU + global max pool → concat (3 × 32 = 96) → LayerNorm → FC(96→64)
+
+    Smaller than CharEncoder by design — word sequences are short (≤32 tokens)
+    and the branch provides complementary signal, not a full replacement.
+    """
+    KERNELS   = [2, 3, 4]
+    FILTERS   = 32
+    EMBED_DIM = 32
+    OUT_DIM   = 64
+
+    def __init__(self, vocab_size: int):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, self.EMBED_DIM, padding_idx=_WORD_PAD)
+        self.convs = nn.ModuleList([
+            nn.Conv1d(self.EMBED_DIM, self.FILTERS, k, padding=k // 2)
+            for k in self.KERNELS
+        ])
+        cnn_out = self.FILTERS * len(self.KERNELS)
+        self.norm = nn.LayerNorm(cnn_out)
+        self.fc   = nn.Linear(cnn_out, self.OUT_DIM)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, WORD_MAX_LEN) → (B, OUT_DIM)"""
+        e = self.embed(x).transpose(1, 2)      # (B, EMBED_DIM, L)
+        pooled = [F.relu(conv(e)).max(dim=2).values for conv in self.convs]
+        h = self.norm(torch.cat(pooled, dim=1))
+        return self.fc(h)                       # (B, 64) — not normalized here
+
+
+# ---------------------------------------------------------------------------
+# Hybrid encoder (char + word)
+# ---------------------------------------------------------------------------
+
+class HybridEncoder(nn.Module):
+    """
+    Char-level CNN (128-dim) ‖ Word-level CNN (64-dim) → fused → 128-dim unit vector.
+
+    The char branch captures n-gram morphology and flag syntax; the word branch
+    adds token-level semantics so `describe-instances` and `terminate-instances`
+    map to different regions of the embedding space.
+
+    Vocab is stored as an instance attribute (not an nn.Parameter) and is
+    persisted in the checkpoint dict alongside the state_dict.
+    """
+    OUT_DIM = 128
+
+    def __init__(self, vocab_size: int):
+        super().__init__()
+        self.char_branch = CommandEncoder()          # 128-dim, normalized
+        self.word_branch = WordBranch(vocab_size)    # 64-dim, unnormalized
+        fused = CommandEncoder.OUT_DIM + WordBranch.OUT_DIM   # 192
+        self.norm = nn.LayerNorm(fused)
+        self.fc   = nn.Linear(fused, self.OUT_DIM)
+        # vocab stored as plain dict — persisted in checkpoint, not as nn params
+        self._vocab: dict[str, int] = {}
+
+    def forward(self, char_ids: torch.Tensor, word_ids: torch.Tensor) -> torch.Tensor:
+        """
+        char_ids: (B, MAX_LEN)      — character token IDs
+        word_ids: (B, WORD_MAX_LEN) — word token IDs
+        → (B, 128) unit vectors
+        """
+        char_emb = self.char_branch(char_ids)     # (B, 128) normalized
+        word_emb = self.word_branch(word_ids)     # (B,  64) unnormalized
+        h = self.norm(torch.cat([char_emb, word_emb], dim=1))   # (B, 192)
+        return F.normalize(self.fc(h), dim=1)     # (B, 128)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +551,87 @@ _DRY_RUN_PATTERN = re.compile(
     r"|(?:^|\s)helm\s+\S+\s+.*?--dry-run",             # helm upgrade ... --dry-run
     re.DOTALL,
 )
+
+
+# ---------------------------------------------------------------------------
+# CLI verb table (heuristic pre-check before k-NN)
+# ---------------------------------------------------------------------------
+#
+# Each entry: (tool_re, verb_re, tier, risk, is_cap)
+# is_cap=True  → use as a ceiling (known-safe reads)
+# is_cap=False → use as a floor  (known-risky mutations)
+#
+# Only fires when the full command string starts with the tool name; verb_re is
+# matched against the full remainder after the tool (handles multi-word CLIs
+# like `aws ec2 describe-instances` and `kubectl rollout status`).
+
+_VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
+    # terraform
+    (re.compile(r"^terraform$"),  re.compile(r"^destroy\b"),                          4,  0.92, False),
+    (re.compile(r"^terraform$"),  re.compile(r"^apply\b"),                            4,  0.82, False),
+    # plan is a dry-run — T-1, not T1
+    (re.compile(r"^terraform$"),  re.compile(r"^plan\b"),                            -1,  0.15, True),
+    (re.compile(r"^terraform$"),  re.compile(r"^(show|output|validate|fmt|graph|version|workspace|state\s+list|providers)\b"), 0, 0.08, True),
+
+    # redis-cli — verb may appear after -h host -p 6379 etc., so match anywhere
+    # in the remainder (not anchored to start).
+    (re.compile(r"^redis-cli$"),  re.compile(r"\b(flushdb|flushall)\b", re.I),         2,  0.48, False),
+    (re.compile(r"^redis-cli$"),  re.compile(r"\b(del|unlink|expire|persist|rename)\b", re.I), 2, 0.40, False),
+    (re.compile(r"^redis-cli$"),  re.compile(r"\b(get|keys|scan|info|dbsize|ttl|type|llen|smembers|hgetall|zrange|config\s+get|ping)\b", re.I), 0, 0.05, True),
+
+    # aws — match service+operation in the remainder
+    (re.compile(r"^aws$"),        re.compile(r"terminate-instances|stop-instances|delete-|deregister-|revoke-|disable-"),  3, 0.65, False),
+    (re.compile(r"^aws$"),        re.compile(r"\bdescribe-|\blist-|\bget-|\bshow-"),  0,  0.05, True),
+
+    # kubectl
+    (re.compile(r"^kubectl$"),    re.compile(r"^delete\b"),                            3,  0.65, False),
+    (re.compile(r"^kubectl$"),    re.compile(r"^(get|describe|logs?|top|explain|diff|version|cluster-info|auth|rollout\s+status|config\s+view)\b"), 0, 0.05, True),
+
+    # git
+    (re.compile(r"^git$"),        re.compile(r"^push\b"),                             3,  0.62, False),
+
+    # npm / yarn publish
+    (re.compile(r"^(npm|yarn|pnpm)$"), re.compile(r"^(publish|unpublish|deprecate)\b"), 3, 0.68, False),
+]
+
+_OPAQUE_EXEC_RE = re.compile(
+    r"(?:python3?|node|perl|ruby|bash|sh)\s+-[ce]\s+"
+    r"|(?<!\w)eval\s+[\$'\"`(]"
+    r"|\|\s*(?:bash|sh)\b"
+    r"|base64\s+-d\s*\|",
+    re.IGNORECASE,
+)
+
+
+def _parse_cli_verb(cmd: str) -> tuple[str, str]:
+    """Return (tool, remainder) from a command string."""
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        parts = cmd.split()
+    if not parts:
+        return "", ""
+    tool = parts[0].lower()
+    remainder = " ".join(parts[1:]).lower()
+    return tool, remainder
+
+
+def _verb_table_lookup(cmd: str) -> dict | None:
+    """
+    Check cmd against the verb table. Returns result dict or None if no match.
+    Floors and caps are both expressed as full results — caller does not need
+    to know the distinction.
+    """
+    tool, remainder = _parse_cli_verb(cmd)
+    # First positional arg (skip flags) used for tools where verb = subcommand
+    first_pos = next((t for t in remainder.split() if not t.startswith("-")), "")
+    for tool_re, verb_re, tier, risk, is_cap in _VERB_TABLE:
+        if not tool_re.match(tool):
+            continue
+        target = remainder if tool in {"aws", "kubectl", "git", "redis-cli"} else first_pos
+        if verb_re.search(target):
+            return {"tier": tier, "risk": risk, "is_cap": is_cap, "heuristic": "verb_table"}
+    return None
 
 
 def is_dry_run(cmd: str) -> bool:
@@ -499,22 +758,52 @@ def predict_risk(
 ) -> dict:
     """
     Risk prediction with heuristic pre-processing:
-      1. Dry-run detection: if cmd contains --dry-run / terraform plan / etc., cap at T-1.
-      2. Compound decomposition: split on &&, ||, ;, |; return max-risk subcommand.
+      1. Verb table: deterministic (tool, verb) → tier/risk for known CLI patterns.
+      2. Opaque execution: python3 -c / eval / pipe-to-sh → T2 floor.
+      3. Dry-run detection: --dry-run / terraform plan / etc. → cap at T-1.
+      4. Compound decomposition: split on &&, ||, ;, |; return max-risk subcommand.
     """
     subcommands = _split_compound(cmd)
 
-    if len(subcommands) == 1:
-        result = _predict_single(cmd, model, dev, ref_embs, ref_entries, k)
-        result["command"] = cmd
-        return result
+    # Score each subcommand independently (works for both single and compound)
+    sub_results: list[dict] = []
+    for sub in subcommands:
+        # --- Verb table pre-check ---
+        verb_hit = _verb_table_lookup(sub)
+        if verb_hit is not None:
+            if verb_hit["is_cap"]:
+                # Known-safe: ML may still override upward if compound has worse seg
+                sub_results.append({
+                    "command": sub, "risk": verb_hit["risk"],
+                    "blast_radius": 0.0, "tier": verb_hit["tier"],
+                    "heuristic": verb_hit["heuristic"], "neighbors": [],
+                })
+                continue
+            else:
+                # Known-risky: floor — don't let ML underestimate
+                ml = _predict_single(sub, model, dev, ref_embs, ref_entries, k)
+                if ml["risk"] < verb_hit["risk"]:
+                    ml["risk"]     = verb_hit["risk"]
+                    ml["tier"]     = verb_hit["tier"]
+                    ml["heuristic"] = verb_hit["heuristic"]
+                sub_results.append(ml)
+                continue
 
-    # Score each subcommand independently, return worst case
-    sub_results = [_predict_single(sub, model, dev, ref_embs, ref_entries, k)
-                   for sub in subcommands]
+        # --- Opaque execution floor (T2) ---
+        if _OPAQUE_EXEC_RE.search(sub):
+            ml = _predict_single(sub, model, dev, ref_embs, ref_entries, k)
+            if ml["tier"] < 2:
+                ml["risk"]     = max(ml["risk"], 0.45)
+                ml["tier"]     = max(ml["tier"], 2)
+                ml["heuristic"] = "opaque_exec"
+            sub_results.append(ml)
+            continue
+
+        sub_results.append(_predict_single(sub, model, dev, ref_embs, ref_entries, k))
+
     best = max(sub_results, key=lambda r: r["risk"])
     result = dict(best)
-    result["command"] = cmd   # restore original compound command
+    result["command"] = cmd
     if debug:
         result["decomposed"] = sub_results
     return result
@@ -563,6 +852,10 @@ def main():
     tr.add_argument("--lr",         type=float, default=1e-3)
     tr.add_argument("--max-pairs",  type=int,   default=None)
     tr.add_argument("--device",     default=None)
+    tr.add_argument("--hybrid",     action="store_true",
+                    help="Train HybridEncoder (char + word branches)")
+    tr.add_argument("--corpus",     default="data/synthetic/scores-cache.jsonl",
+                    help="Scored corpus for building word vocab (--hybrid only)")
 
     ev = sub.add_parser("eval")
     ev.add_argument("--checkpoint", required=True)
@@ -584,6 +877,8 @@ def main():
             lr=args.lr,
             max_pairs=args.max_pairs,
             device=args.device,
+            hybrid=args.hybrid,
+            corpus_path=args.corpus,
         )
 
     elif args.cmd == "eval":
