@@ -620,6 +620,11 @@ _EXFIL_EXEC_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LOOPBACK_RE = re.compile(
+    r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?:[:/]|$)",
+    re.IGNORECASE,
+)
+
 _OPAQUE_EXEC_RE = re.compile(
     r"(?:python3?|node|perl|ruby|bash|sh)\s+-[ce]\s+"
     r"|(?<!\w)eval\s+[\$'\"`(]"
@@ -792,7 +797,8 @@ def predict_risk(
     """
     # Check exfil patterns against the full unsplit command first — pipe-based
     # patterns like `curl ... | bash` are destroyed by compound splitting.
-    if _EXFIL_EXEC_RE.search(cmd):
+    # Loopback URLs (localhost, 127.0.0.1, etc.) are exempted — local dev traffic.
+    if _EXFIL_EXEC_RE.search(cmd) and not _LOOPBACK_RE.search(cmd):
         return {
             "command": cmd, "risk": 0.95, "tier": -2,
             "heuristic": "exfil_exec", "neighbors": [], "blast_radius": 0.0,
@@ -812,7 +818,7 @@ def predict_risk(
             continue
 
         # --- Exfil / remote code execution floor (T-2) ---
-        if _EXFIL_EXEC_RE.search(sub):
+        if _EXFIL_EXEC_RE.search(sub) and not _LOOPBACK_RE.search(sub):
             ml = _predict_single(sub, model, dev, ref_embs, ref_entries, k)
             ml["risk"]      = max(ml["risk"], 0.95)
             ml["tier"]      = -2
