@@ -585,14 +585,40 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
 
     # kubectl
     (re.compile(r"^kubectl$"),    re.compile(r"^delete\b"),                            3,  0.65, False),
+    (re.compile(r"^kubectl$"),    re.compile(r"^apply\b"),                             3,  0.62, False),
     (re.compile(r"^kubectl$"),    re.compile(r"^(get|describe|logs?|top|explain|diff|version|cluster-info|auth|rollout\s+status|config\s+view)\b"), 0, 0.05, True),
 
     # git
     (re.compile(r"^git$"),        re.compile(r"^push\b"),                             3,  0.62, False),
 
+    # aws write ops not covered by terminate/delete pattern
+    (re.compile(r"^aws$"),        re.compile(r"\bsns\s+publish\b|\bsqs\s+send-message\b|\bs3\s+cp\b|\bs3\s+mv\b|\bs3\s+sync\b|\bec2\s+run-instances\b"), 3, 0.62, False),
+
+    # find -delete: file deletion via find is T4 (operates recursively, often at scale)
+    (re.compile(r"^find$"),       re.compile(r"\B-delete\b"),                          4,  0.80, False),
+
+    # system power/init commands
+    (re.compile(r"^(sudo|reboot|shutdown|poweroff|init|systemctl)$"),
+                                  re.compile(r"^(reboot|shutdown|poweroff|halt|stop|disable)"),
+                                                                                       4,  0.82, False),
+
     # npm / yarn publish
     (re.compile(r"^(npm|yarn|pnpm)$"), re.compile(r"^(publish|unpublish|deprecate)\b"), 3, 0.68, False),
 ]
+
+_EXFIL_EXEC_RE = re.compile(
+    r'eval\s+"\$\(curl'
+    r"|curl\s+.*\|\s*(ba)?sh"
+    r"|wget\s+.*\|\s*(ba)?sh"
+    r"|curl\s+.*\|\s*python"
+    r"|base64\s+-d\s*\|\s*(ba)?sh"
+    r"|curl\s+.*-d\s+.*@/etc/(passwd|shadow)"
+    r"|nc\s+-[a-z]*e\s+/bin/(ba)?sh"
+    r"|/dev/tcp/"
+    r"|urllib\.request\.urlopen\("
+    r"|requests\.get\(.*\)\.text.*exec\(",
+    re.IGNORECASE,
+)
 
 _OPAQUE_EXEC_RE = re.compile(
     r"(?:python3?|node|perl|ruby|bash|sh)\s+-[ce]\s+"
@@ -757,17 +783,43 @@ def predict_risk(
     debug: bool = False,
 ) -> dict:
     """
-    Risk prediction with heuristic pre-processing:
-      1. Verb table: deterministic (tool, verb) → tier/risk for known CLI patterns.
-      2. Opaque execution: python3 -c / eval / pipe-to-sh → T2 floor.
-      3. Dry-run detection: --dry-run / terraform plan / etc. → cap at T-1.
-      4. Compound decomposition: split on &&, ||, ;, |; return max-risk subcommand.
+    Risk prediction with heuristic pre-processing (priority order):
+      1. Dry-run detection: --dry-run / terraform plan / etc. → cap at T-1 (0.12).
+      2. Exfil/RCE: curl|bash, eval "$(curl ..)", etc. → floor at T-2 (0.95).
+      3. Verb table: deterministic (tool, verb) → tier/risk for known CLI patterns.
+      4. Opaque execution: python3 -c / eval / pipe-to-sh → T2 floor.
+      5. Compound decomposition: split on &&, ||, ;, |; return max-risk subcommand.
     """
+    # Check exfil patterns against the full unsplit command first — pipe-based
+    # patterns like `curl ... | bash` are destroyed by compound splitting.
+    if _EXFIL_EXEC_RE.search(cmd):
+        return {
+            "command": cmd, "risk": 0.95, "tier": -2,
+            "heuristic": "exfil_exec", "neighbors": [], "blast_radius": 0.0,
+        }
+
     subcommands = _split_compound(cmd)
 
     # Score each subcommand independently (works for both single and compound)
     sub_results: list[dict] = []
     for sub in subcommands:
+        # --- Dry-run cap (highest priority — overrides verb table floors) ---
+        if is_dry_run(sub):
+            sub_results.append({
+                "command": sub, "risk": 0.12, "tier": -1,
+                "heuristic": "dry_run_cap", "neighbors": [], "blast_radius": 0.0,
+            })
+            continue
+
+        # --- Exfil / remote code execution floor (T-2) ---
+        if _EXFIL_EXEC_RE.search(sub):
+            ml = _predict_single(sub, model, dev, ref_embs, ref_entries, k)
+            ml["risk"]      = max(ml["risk"], 0.95)
+            ml["tier"]      = -2
+            ml["heuristic"] = "exfil_exec"
+            sub_results.append(ml)
+            continue
+
         # --- Verb table pre-check ---
         verb_hit = _verb_table_lookup(sub)
         if verb_hit is not None:
@@ -864,7 +916,7 @@ def main():
 
     em = sub.add_parser("embed")
     em.add_argument("--checkpoint", required=True)
-    em.add_argument("--cmd",        required=True)
+    em.add_argument("--cmd", dest="embed_cmd", required=True)
     em.add_argument("--scores-cache", default="data/synthetic/scores-cache.jsonl")
 
     args = p.parse_args()
@@ -887,7 +939,7 @@ def main():
     elif args.cmd == "embed":
         model, dev = load_model(args.checkpoint)
         ref_embs, ref_entries = build_reference_index(args.scores_cache, model, dev)
-        result = predict_risk(args.cmd, model, dev, ref_embs, ref_entries)
+        result = predict_risk(args.embed_cmd, model, dev, ref_embs, ref_entries)
         print(json.dumps(result, indent=2))
 
 

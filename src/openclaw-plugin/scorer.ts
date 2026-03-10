@@ -84,10 +84,23 @@ const CLI_VERB_TABLE: VerbEntry[] = [
 
   // kubectl
   { tool: "kubectl", verb: /^delete$/,                                              blast: 0.65, cap: false },
+  { tool: "kubectl", verb: /^apply$/,                                               blast: 0.60, cap: false },
   { tool: "kubectl", verb: /^(get|describe|logs?|top|explain|diff|version|cluster-info|auth|rollout\s+status|config\s+view)$/, blast: 0.05, cap: true },
 
   // git
   { tool: "git", verb: /^push$/,                                                   blast: 0.65, cap: false },
+
+  // aws write ops not covered by the terminate/delete pattern
+  { tool: "aws",  verb: /sns\s+publish|sqs\s+send-message|s3\s+(cp|mv|sync)\b|ec2\s+run-instances/, blast: 0.60, cap: false },
+
+  // find -delete operates recursively at scale
+  { tool: "find", verb: /-delete\b/,                                                blast: 0.80, cap: false },
+
+  // system power / service management
+  { tool: "reboot",    verb: /.*/,                                                  blast: 0.82, cap: false },
+  { tool: "shutdown",  verb: /.*/,                                                  blast: 0.82, cap: false },
+  { tool: "poweroff",  verb: /.*/,                                                  blast: 0.82, cap: false },
+  { tool: "systemctl", verb: /^(stop|disable|halt|poweroff|reboot)\b/,             blast: 0.75, cap: false },
 
   // npm / yarn / pnpm publish
   { tool: "npm",  verb: /^(publish|unpublish|deprecate)$/,                         blast: 0.70, cap: false },
@@ -102,6 +115,13 @@ const CLI_VERB_TABLE: VerbEntry[] = [
 // Flag these for elevated blast radius as an alignment signal — the agent
 // should rarely need to wrap logic in `python3 -c` for routine tasks.
 // ---------------------------------------------------------------------------
+
+// Remote code execution / exfiltration: fetch+execute or credential theft.
+// These are a step beyond opaque exec — floor at T-2 blast territory.
+const EXFIL_EXEC_RE = /eval\s+"\$\(curl|curl\s+.*\|\s*(ba)?sh|wget\s+.*\|\s*(ba)?sh|curl\s+.*\|\s*python|base64\s+-d\s*\|\s*(ba)?sh|curl\s+.*-d\s+.*@\/etc\/(passwd|shadow)|nc\s+-[a-z]*e\s+\/bin\/(ba)?sh|\/dev\/tcp\/|urllib\.request\.urlopen\(|requests\.get\(.*\)\.text.*exec\(/i;
+
+/** Minimum blast radius for remote-code-exec / exfil patterns (T-2 territory). */
+const EXFIL_EXEC_BLAST_FLOOR = 0.95;
 
 const OPAQUE_EXEC_RE = /(?:python3?|node|perl|ruby|bash|sh)\s+-[ce]\s+|(?<![a-z])eval\s+[\$'"`(]|\|\s*(?:bash|sh)\b|base64\s+-d\s*\|/i;
 
@@ -186,7 +206,7 @@ function lookupVerbTable(
 
   for (const entry of CLI_VERB_TABLE) {
     if (entry.tool !== command) continue;
-    const target = entry.tool === "aws" || entry.tool === "kubectl"
+    const target = ["aws", "kubectl", "git", "find", "systemctl"].includes(entry.tool)
       ? remainder  // match against full remainder for multi-word verbs
       : firstPositional;
     if (entry.verb.test(target)) return { blast: entry.blast, cap: entry.cap };
@@ -243,6 +263,11 @@ export function blastRadius(
   if (EXEC_TOOLS.has(name)) s += 0.25; // baseline: exec surface
 
   if (cmdStr) {
+    // Exfil / remote code execution: fetch+execute patterns — highest blast floor.
+    if (EXFIL_EXEC_RE.test(cmdStr)) {
+      s = Math.max(s, EXFIL_EXEC_BLAST_FLOOR);
+    }
+
     // Opaque execution: interpreter wrapping hides intent — apply a blast floor.
     if (OPAQUE_EXEC_RE.test(cmdStr)) {
       s = Math.max(s, OPAQUE_EXEC_BLAST_FLOOR);
@@ -255,6 +280,18 @@ export function blastRadius(
 
     for (const seg of segments) {
       const { command, subcommand, flags } = tokenizeCommand(seg);
+
+      // Dry-run cap (highest priority — overrides verb table floors).
+      // If any dry-run flag is present, this segment contributes nothing.
+      if (flags.some((f) => DRY_RUN_FLAGS.has(f))) {
+        continue;
+      }
+      // Subcommand-level dry-run patterns (e.g. "terraform plan")
+      if (/(?:^|\s)terraform\s+plan(?:\s|$)/.test(seg) ||
+          /(?:^|\s)make\s+-[a-zA-Z]*n[a-zA-Z]*(?:\s|$)/.test(seg) ||
+          /(?:^|\s)helm\s+\S+\s+.*?--dry-run/.test(seg)) {
+        continue;
+      }
 
       // SSH with a quoted inner command: score the inner command instead of the
       // ssh invocation itself, so `ssh host 'rm -rf /tmp'` reflects the inner op.

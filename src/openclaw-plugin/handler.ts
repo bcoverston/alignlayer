@@ -17,6 +17,39 @@ import fs from "fs";
 import path from "path";
 
 // ---------------------------------------------------------------------------
+// ML scoring server (async enrichment — advisory, not blocking)
+// ---------------------------------------------------------------------------
+
+const ML_SERVER_URL = process.env["ALIGNLAYER_ML_URL"] ?? "http://localhost:8000";
+const ML_TIMEOUT_MS = 200;
+
+interface MlScoreResult {
+  command: string;
+  risk: number;
+  tier: number;
+  decision: string;
+}
+
+async function fetchMlScore(command: string): Promise<MlScoreResult | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ML_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${ML_SERVER_URL}/score`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command }),
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as MlScoreResult;
+  } catch {
+    return null;  // timeout or connection refused — ML is advisory
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Scorer (inlined — OpenClaw's hook runtime does not resolve relative imports)
 // Keep in sync with scorer.ts
 // ---------------------------------------------------------------------------
@@ -72,11 +105,20 @@ function blastRadius(toolName: string, args: Record<string, unknown>): number {
     : "";
   let s = 0;
   if (EXEC_TOOLS.has(name)) s += 0.25;
+  const EXFIL_EXEC_RE = /eval\s+"\$\(curl|curl\s+.*\|\s*(ba)?sh|wget\s+.*\|\s*(ba)?sh|curl\s+.*\|\s*python|base64\s+-d\s*\|\s*(ba)?sh|\/dev\/tcp\//i;
   if (cmdStr) {
+    // Exfil / remote code execution floor
+    if (EXFIL_EXEC_RE.test(cmdStr)) s = Math.max(s, 0.95);
     const segments = cmdStr.split(/&&|\|\||;/).map((seg) => seg.trim()).filter(Boolean);
     let maxIrr = 0;
     for (const seg of segments) {
       const { command, subcommand, flags } = tokenizeCommand(seg);
+
+      // Dry-run cap: segments with dry-run flags contribute nothing.
+      if (flags.some((f) => DRY_RUN_FLAGS.has(f))) continue;
+      if (/(?:^|\s)terraform\s+plan(?:\s|$)/.test(seg) ||
+          /(?:^|\s)make\s+-[a-zA-Z]*n[a-zA-Z]*(?:\s|$)/.test(seg)) continue;
+
       if (IRREVERSIBILITY_TOKENS.some((t) => `${command} ${subcommand}`.includes(t)))
         maxIrr = Math.max(maxIrr, 0.5 + flagModifier(flags));
     }
@@ -152,6 +194,10 @@ interface TraceEntry {
   decision: "allow" | "interrupt" | null;
   /** Populated when a human acts on an interrupt. Null until Phase 1 approval integration. */
   human_outcome: "approved" | "denied" | "allow-always" | null;
+  /** ML server enrichment (async, advisory). Null if ML server unavailable. */
+  ml_risk?: number | null;
+  ml_tier?: number | null;
+  ml_decision?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -304,17 +350,38 @@ function handleToolResult(payload: AgentEventPayload): void {
     timestamp: new Date(ts).toISOString(),
     event: "after_tool_call",
     tool: toolName,
-    // Carry forward args + risk scores from the paired before-trace if available.
     args: pending?.args ?? {},
     risk_score: pending?.risk_score ?? null,
     blast_radius: pending?.blast_radius ?? null,
     plan_confidence: pending?.plan_confidence ?? null,
     decision: pending?.decision ?? null,
     human_outcome: null,
+    ml_risk: null,
+    ml_tier: null,
+    ml_decision: null,
   };
 
   pendingCalls.delete(toolCallId);
-  appendTrace(entry);
+
+  // Extract command for ML enrichment (exec tools only).
+  const args = pending?.args ?? {};
+  const cmdStr = String(args["command"] ?? args["cmd"] ?? args["input"] ?? "");
+
+  if (cmdStr) {
+    // Fire-and-forget: ML enrichment is advisory, not blocking.
+    fetchMlScore(cmdStr).then((ml) => {
+      if (ml) {
+        entry.ml_risk = ml.risk;
+        entry.ml_tier = ml.tier;
+        entry.ml_decision = ml.decision;
+      }
+      appendTrace(entry);
+    }).catch(() => {
+      appendTrace(entry);
+    });
+  } else {
+    appendTrace(entry);
+  }
 
   if (isError) {
     console.warn(`[alignlayer] tool error — ${toolName}`);
