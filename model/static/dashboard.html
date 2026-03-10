@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AlignLayer Observer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #c9d1d9; --text-dim: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149; --orange: #db6d28;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'SF Mono', 'Fira Code', monospace; background: var(--bg); color: var(--text); font-size: 13px; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 16px; color: var(--accent); margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }
+  h1 .status { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  h2 { font-size: 13px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+  .stat { font-size: 28px; font-weight: bold; color: var(--accent); }
+  .stat-label { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+
+  .bar-chart { display: flex; flex-direction: column; gap: 3px; }
+  .bar-row { display: flex; align-items: center; gap: 8px; }
+  .bar-label { width: 50px; text-align: right; font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+  .bar-track { flex: 1; height: 16px; background: var(--bg); border-radius: 3px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; min-width: 1px; }
+  .bar-count { width: 36px; font-size: 11px; color: var(--text-dim); }
+
+  .tier-bar { --color: var(--text-dim); }
+  .tier-T-2 { --color: var(--red); }
+  .tier-T-1 { --color: var(--green); }
+  .tier-T0 { --color: #388bfd; }
+  .tier-T1 { --color: var(--accent); }
+  .tier-T2 { --color: var(--yellow); }
+  .tier-T3 { --color: var(--orange); }
+  .tier-T4 { --color: var(--red); }
+
+  .risk-low { background: var(--green); }
+  .risk-med { background: var(--yellow); }
+  .risk-high { background: var(--orange); }
+  .risk-crit { background: var(--red); }
+
+  .tail { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .tail-header { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  .tail-body { max-height: 500px; overflow-y: auto; font-size: 12px; }
+  .tail-entry { padding: 6px 12px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 140px 70px 80px 60px 1fr; gap: 8px; align-items: center; }
+  .tail-entry:hover { background: rgba(88,166,255,0.05); }
+  .tail-ts { color: var(--text-dim); font-size: 11px; }
+  .tail-tool { color: var(--accent); }
+  .tail-tier { font-weight: bold; padding: 1px 6px; border-radius: 3px; font-size: 11px; text-align: center; }
+  .tail-risk { font-size: 12px; }
+  .tail-cmd { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tail-cmd.non-exec { color: var(--text-dim); font-style: italic; }
+
+  .wide { grid-column: 1 / -1; }
+  .two-col { grid-column: span 2; }
+
+  .tools-grid { display: flex; flex-wrap: wrap; gap: 4px; }
+  .tool-chip { padding: 2px 8px; border-radius: 3px; background: var(--bg); font-size: 11px; border: 1px solid var(--border); }
+  .tool-chip .count { color: var(--accent); margin-left: 4px; }
+
+  .decision-bar { display: flex; height: 24px; border-radius: 4px; overflow: hidden; margin-top: 4px; }
+  .decision-allow { background: var(--green); }
+  .decision-interrupt { background: var(--red); }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1><span class="status" id="status-dot"></span> AlignLayer Observer</h1>
+
+  <div class="grid">
+    <div class="card">
+      <div class="stat" id="total-events">—</div>
+      <div class="stat-label">Total Events</div>
+    </div>
+    <div class="card">
+      <div class="stat" id="total-scored">—</div>
+      <div class="stat-label">Scored (exec tools)</div>
+    </div>
+    <div class="card">
+      <div class="stat" id="interrupt-rate">—</div>
+      <div class="stat-label">Would-Interrupt Rate</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Tier Distribution</h2>
+      <div class="bar-chart" id="tier-chart"></div>
+    </div>
+    <div class="card">
+      <h2>Risk Distribution</h2>
+      <div class="bar-chart" id="risk-chart"></div>
+    </div>
+    <div class="card">
+      <h2>Decision Split</h2>
+      <div class="decision-bar" id="decision-bar"></div>
+      <div style="margin-top:8px" id="decision-labels"></div>
+      <h2 style="margin-top:16px">Tools</h2>
+      <div class="tools-grid" id="tool-chips"></div>
+    </div>
+  </div>
+
+  <div class="tail">
+    <div class="tail-header">
+      <h2 style="margin:0">Live Tail</h2>
+      <span id="tail-count" style="color:var(--text-dim);font-size:11px"></span>
+    </div>
+    <div class="tail-body" id="tail-body"></div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+const POLL_MS = 3000;
+
+function tierClass(tier) {
+  const map = { '-2': 'T-2', '-1': 'T-1', '0': 'T0', '1': 'T1', '2': 'T2', '3': 'T3', '4': 'T4' };
+  return 'tier-' + (map[String(tier)] || 'T0');
+}
+
+function tierLabel(tier) {
+  const map = { '-2': 'T-2 exfil', '-1': 'T-1 dry-run', '0': 'T0 read', '1': 'T1 write', '2': 'T2 destruct', '3': 'T3 external', '4': 'T4 catastrophic' };
+  return map[String(tier)] || `T${tier}`;
+}
+
+function tierColor(tierKey) {
+  const map = { 'T-2': '#f85149', 'T-1': '#3fb950', 'T+0': '#388bfd', 'T+1': '#58a6ff', 'T+2': '#d29922', 'T+3': '#db6d28', 'T+4': '#f85149' };
+  return map[tierKey] || '#8b949e';
+}
+
+function riskClass(r) {
+  if (r < 0.3) return 'risk-low';
+  if (r < 0.55) return 'risk-med';
+  if (r < 0.75) return 'risk-high';
+  return 'risk-crit';
+}
+
+function riskColor(r) {
+  if (r < 0.3) return 'var(--green)';
+  if (r < 0.55) return 'var(--yellow)';
+  if (r < 0.75) return 'var(--orange)';
+  return 'var(--red)';
+}
+
+function formatTime(ts) {
+  if (!ts) return '';
+  try { return new Date(ts).toLocaleTimeString(); } catch { return ts.slice(11, 19); }
+}
+
+async function fetchJSON(path) {
+  const res = await fetch(API + path);
+  return res.json();
+}
+
+function renderBars(container, data, colorFn) {
+  const max = Math.max(1, ...Object.values(data));
+  container.innerHTML = Object.entries(data).map(([label, count]) => {
+    const pct = (count / max * 100).toFixed(1);
+    const color = colorFn(label);
+    return `<div class="bar-row">
+      <span class="bar-label">${label}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
+      <span class="bar-count">${count}</span>
+    </div>`;
+  }).join('');
+}
+
+async function updateStats() {
+  try {
+    const [stats, dist] = await Promise.all([
+      fetchJSON('/traces/stats'),
+      fetchJSON('/traces/distributions'),
+    ]);
+
+    document.getElementById('total-events').textContent = stats.total_events.toLocaleString();
+    document.getElementById('total-scored').textContent = dist.total_scored.toLocaleString();
+
+    const total = dist.decisions.allow + dist.decisions.interrupt;
+    const rate = total > 0 ? ((dist.decisions.interrupt / total) * 100).toFixed(1) + '%' : '—';
+    document.getElementById('interrupt-rate').textContent = rate;
+
+    // Tier chart
+    renderBars(document.getElementById('tier-chart'), dist.tier_counts, tierColor);
+
+    // Risk histogram
+    const riskBuckets = dist.risk_histogram;
+    renderBars(document.getElementById('risk-chart'), riskBuckets, (label) => {
+      const low = parseFloat(label);
+      return riskColor(low + 0.05);
+    });
+
+    // Decision bar
+    if (total > 0) {
+      const allowPct = (dist.decisions.allow / total * 100).toFixed(1);
+      const intPct = (dist.decisions.interrupt / total * 100).toFixed(1);
+      document.getElementById('decision-bar').innerHTML =
+        `<div class="decision-allow" style="width:${allowPct}%"></div>` +
+        `<div class="decision-interrupt" style="width:${intPct}%"></div>`;
+      document.getElementById('decision-labels').innerHTML =
+        `<span style="color:var(--green)">allow ${dist.decisions.allow}</span> · ` +
+        `<span style="color:var(--red)">interrupt ${dist.decisions.interrupt}</span>`;
+    }
+
+    // Tool chips
+    document.getElementById('tool-chips').innerHTML = Object.entries(dist.tool_counts)
+      .map(([tool, count]) => `<span class="tool-chip">${tool}<span class="count">${count}</span></span>`)
+      .join('');
+
+    document.getElementById('status-dot').style.background = 'var(--green)';
+  } catch (e) {
+    document.getElementById('status-dot').style.background = 'var(--red)';
+  }
+}
+
+async function updateTail() {
+  try {
+    const data = await fetchJSON('/traces/tail?n=100');
+    const body = document.getElementById('tail-body');
+    document.getElementById('tail-count').textContent = `${data.count} events`;
+
+    body.innerHTML = data.entries.map(e => {
+      const ts = formatTime(e.ts);
+      const tool = e.tool || 'unknown';
+      const cmd = e.tool_input?.command || e.tool_input?.file_path || e.tool_input?.pattern || e.tool_input?.query || '—';
+      const isExec = e.ml_risk != null;
+      const risk = isExec ? e.ml_risk.toFixed(2) : '—';
+      const tier = isExec ? e.ml_tier : null;
+      const tierStr = tier != null ? tierLabel(tier) : e.tool;
+      const tierCls = tier != null ? tierClass(tier) : '';
+
+      return `<div class="tail-entry">
+        <span class="tail-ts">${ts} ${e.event === 'PostToolUse' ? '←' : '→'}</span>
+        <span class="tail-tool">${tool}</span>
+        <span class="tail-tier ${tierCls}" style="${tier != null ? `background:${tierColor('T' + (tier >= 0 ? '+' : '') + tier)}22;color:${tierColor('T' + (tier >= 0 ? '+' : '') + tier)}` : ''}">${tierStr}</span>
+        <span class="tail-risk" style="color:${isExec ? riskColor(e.ml_risk) : 'var(--text-dim)'}">${risk}</span>
+        <span class="tail-cmd ${isExec ? '' : 'non-exec'}">${cmd.replace(/</g, '&lt;')}</span>
+      </div>`;
+    }).join('');
+  } catch (e) {}
+}
+
+async function poll() {
+  await Promise.all([updateStats(), updateTail()]);
+  setTimeout(poll, POLL_MS);
+}
+
+poll();
+</script>
+</body>
+</html>

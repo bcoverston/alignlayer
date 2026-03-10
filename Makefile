@@ -7,8 +7,10 @@ IMAGE       ?= alignlayer-scorer
 MAX_PAIRS   ?= 2000000
 BOUNDARY_PAIRS ?= 50000
 K           ?= 5
+PID_FILE    := data/traces/.serve.pid
+PORT        ?= 8000
 
-.PHONY: eval eval-report adversarial pairs train trend serve docker-build docker-run help
+.PHONY: eval eval-report adversarial pairs train trend serve serve-bg serve-stop docker-build docker-run help
 
 ## Run scenario benchmark against current checkpoint
 eval:
@@ -56,11 +58,49 @@ print('-'*60); \
 prev = None; \
 [print(f\"{r['run_id'][:25]} {r['overall_acc']:6.3f} {r['fn_rate_t3_t4']:9.3f} {r['fp_rate_t0_t1']:7.3f} {r['corpus_size']:8,}\") for r in rows]"
 
-## Run scoring server locally (no Docker)
+## Run scoring server locally (foreground)
 serve:
 	ALIGNLAYER_CHECKPOINT=$(CHECKPOINT) \
 	ALIGNLAYER_CORPUS=$(CORPUS) \
+	PORT=$(PORT) \
 	$(PYTHON) model/serve.py
+
+## Start scoring server in background with PID tracking
+serve-bg:
+	@if [ -f $(PID_FILE) ] && kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
+		echo "Server already running (PID $$(cat $(PID_FILE)))"; \
+	else \
+		mkdir -p $$(dirname $(PID_FILE)); \
+		ALIGNLAYER_CHECKPOINT=$(CHECKPOINT) \
+		ALIGNLAYER_CORPUS=$(CORPUS) \
+		PORT=$(PORT) \
+		nohup $(PYTHON) model/serve.py > data/traces/serve.log 2>&1 & \
+		echo $$! > $(PID_FILE); \
+		echo "Server started (PID $$(cat $(PID_FILE))), log → data/traces/serve.log"; \
+		sleep 2; \
+		if kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
+			echo "Health: $$(curl -s http://localhost:$(PORT)/health)"; \
+		else \
+			echo "Server failed to start. Check data/traces/serve.log"; \
+			rm -f $(PID_FILE); \
+			exit 1; \
+		fi \
+	fi
+
+## Stop background scoring server
+serve-stop:
+	@if [ -f $(PID_FILE) ]; then \
+		PID=$$(cat $(PID_FILE)); \
+		if kill -0 $$PID 2>/dev/null; then \
+			kill $$PID; \
+			echo "Stopped server (PID $$PID)"; \
+		else \
+			echo "PID $$PID not running (stale PID file)"; \
+		fi; \
+		rm -f $(PID_FILE); \
+	else \
+		echo "No PID file found at $(PID_FILE)"; \
+	fi
 
 ## Build Docker image
 docker-build:
@@ -77,5 +117,5 @@ docker-run:
 		$(IMAGE)
 
 help:
-	@echo "Targets: eval adversarial eval-report pairs train trend serve docker-build docker-run"
-	@echo "Overrides: CHECKPOINT=... CORPUS=... K=... IMAGE=..."
+	@echo "Targets: eval adversarial eval-report pairs train trend serve serve-bg serve-stop docker-build docker-run"
+	@echo "Overrides: CHECKPOINT=... CORPUS=... K=... PORT=... IMAGE=..."
