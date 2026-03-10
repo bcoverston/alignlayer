@@ -467,8 +467,8 @@ def _pair_entry(pair_id: int, a: dict, b: dict, label: int, similar: bool,
     delta = round(abs(a["risk"] - b["risk"]), 4)
     return {
         "id":       f"pair-{pair_id:06d}",
-        "action_a": {k: a[k] for k in ("id", "tool", "args", "text", "risk", "tier", "reasoning", "flags")},
-        "action_b": {k: b[k] for k in ("id", "tool", "args", "text", "risk", "tier", "reasoning", "flags")},
+        "action_a": {k: a.get(k, "") for k in ("id", "tool", "args", "text", "risk", "tier", "reasoning", "flags")},
+        "action_b": {k: b.get(k, "") for k in ("id", "tool", "args", "text", "risk", "tier", "reasoning", "flags")},
         "delta":    delta,
         "label":    label,
         "similar":  similar,
@@ -496,13 +496,15 @@ def make_pairs(
     now = datetime.now(timezone.utc).isoformat()
     pair_id = 0
 
+    # Group by tier (used by both phases)
+    by_tier: dict[int, list[dict]] = {}
+    for entry in scored:
+        t = entry.get("tier")
+        if t is not None:
+            by_tier.setdefault(t, []).append(entry)
+
     # ── Phase 1: Explicit boundary pairs ───────────────────────────────────
     if boundary_pairs > 0:
-        by_tier: dict[int, list[dict]] = {}
-        for entry in scored:
-            t = entry.get("tier")
-            if t is not None:
-                by_tier.setdefault(t, []).append(entry)
         for tiers in FORCED_DISSIMILAR_BOUNDARIES:
             ta, tb = sorted(tiers)
             pool_a = by_tier.get(ta, [])
@@ -519,18 +521,41 @@ def make_pairs(
                 pair_id += 1
             print(f"  boundary {ta}↔{tb}: {n} forced-dissimilar pairs added")
 
-    # ── Phase 2: Risk-delta-based pairs ───────────────────────────────────
-    idx = list(range(len(scored)))
-    rng.shuffle(idx)
+    # ── Phase 2: Tier-stratified pairs ────────────────────────────────────
+    # Allocate equal budget across all tier-pair combinations so minority
+    # tiers (T-2, T2, T4) get the same representation as T0/T1.
+    remaining = (max_pairs - len(pairs)) if max_pairs is not None else 2_000_000
 
-    for ii in range(len(idx)):
-        if max_pairs is not None and len(pairs) >= max_pairs:
-            break
-        a = scored[idx[ii]]
-        for jj in range(ii + 1, len(idx)):
-            if max_pairs is not None and len(pairs) >= max_pairs:
-                break
-            b = scored[idx[jj]]
+    tiers_present = sorted(by_tier.keys())
+    # All ordered tier-pair combos: (T_i, T_j) where i <= j
+    combos = []
+    for i, ta in enumerate(tiers_present):
+        for tb in tiers_present[i:]:
+            combos.append((ta, tb))
+
+    if not combos:
+        return pairs
+
+    budget_per_combo = remaining // len(combos)
+    print(f"  stratified: {len(combos)} tier combos, {budget_per_combo:,} pairs each")
+
+    for ta, tb in combos:
+        pool_a = by_tier[ta]
+        pool_b = by_tier[tb]
+        rng.shuffle(pool_a)
+        rng.shuffle(pool_b)
+
+        combo_count = 0
+        attempts = 0
+        max_attempts = budget_per_combo * 5  # avoid infinite loop on sparse combos
+
+        while combo_count < budget_per_combo and attempts < max_attempts:
+            attempts += 1
+            a = pool_a[rng.randrange(len(pool_a))]
+            b = pool_b[rng.randrange(len(pool_b))]
+            if ta == tb and a is b:
+                continue
+
             delta = abs(a["risk"] - b["risk"])
             if delta < SIMILAR_THRESHOLD:
                 label, similar = 0, True
@@ -541,7 +566,14 @@ def make_pairs(
 
             pairs.append(_pair_entry(pair_id, a, b, label, similar, now))
             pair_id += 1
+            combo_count += 1
 
+        if combo_count < budget_per_combo and combo_count > 0:
+            print(f"  warning: {ta}↔{tb} only yielded {combo_count:,}/{budget_per_combo:,} pairs")
+
+    n_sim = sum(1 for p in pairs if p["similar"])
+    n_dis = len(pairs) - n_sim
+    print(f"  {len(pairs):,} pairs — {n_sim:,} similar, {n_dis:,} dissimilar")
     return pairs
 
 
@@ -736,10 +768,6 @@ def main() -> None:
     print(f"\nGenerating pairs from {len(scored)} scored commands{cap_msg}...")
     pairs = make_pairs(scored, rng=rng, max_pairs=args.max_pairs,
                        boundary_pairs=args.boundary_pairs)
-
-    similar_count    = sum(1 for p in pairs if p["similar"])
-    dissimilar_count = len(pairs) - similar_count
-    print(f"  {len(pairs)} pairs — {similar_count} similar, {dissimilar_count} dissimilar")
 
     # ── Step 4: Write output ───────────────────────────────────────────────
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
