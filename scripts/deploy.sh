@@ -2,40 +2,52 @@
 # AlignLayer deploy script
 #
 # Usage:
-#   ./scripts/deploy.sh openclaw   — sync hook to pi + restart gateway
+#   ./scripts/deploy.sh openclaw   — sync hook to deploy host + restart gateway
 #   ./scripts/deploy.sh claudecode  — install PreToolUse/PostToolUse hooks locally
 #   ./scripts/deploy.sh all         — both
 #
 # Requirements:
-#   openclaw target: ssh access to 'pi', jq, rsync, docker
+#   openclaw target: ssh access to ALIGNLAYER_DEPLOY_HOST, jq, rsync, docker
 #   claudecode target: jq
+#
+# Configuration (via .env or environment):
+#   ALIGNLAYER_DEPLOY_HOST  — SSH host for OpenClaw deploy (default: pi)
+#   ALIGNLAYER_DEPLOY_PATH  — OpenClaw install path on remote (default: /opt/openclaw)
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Load .env if present
+if [[ -f "$REPO_ROOT/.env" ]]; then
+  set -a; source "$REPO_ROOT/.env"; set +a
+fi
+
+DEPLOY_HOST="${ALIGNLAYER_DEPLOY_HOST:-pi}"
+DEPLOY_PATH="${ALIGNLAYER_DEPLOY_PATH:-/opt/openclaw}"
+
 # ── OpenClaw ─────────────────────────────────────────────────────────────────
 
 deploy_openclaw() {
-  echo "→ OpenClaw: syncing hook files to pi..."
+  echo "→ OpenClaw: syncing hook files to $DEPLOY_HOST..."
   rsync -av --delete \
     "$REPO_ROOT/src/openclaw-plugin/" \
-    pi:/opt/openclaw/data/hooks/alignlayer/
+    "$DEPLOY_HOST:$DEPLOY_PATH/data/hooks/alignlayer/"
 
-  echo "→ OpenClaw: syncing plugin files to pi..."
-  ssh pi "mkdir -p /opt/openclaw/data/extensions/alignlayer"
+  echo "→ OpenClaw: syncing plugin files to $DEPLOY_HOST..."
+  ssh "$DEPLOY_HOST" "mkdir -p $DEPLOY_PATH/data/extensions/alignlayer"
   rsync -av \
     "$REPO_ROOT/src/openclaw-plugin/openclaw.plugin.json" \
     "$REPO_ROOT/src/openclaw-plugin/index.ts" \
-    pi:/opt/openclaw/data/extensions/alignlayer/
+    "$DEPLOY_HOST:$DEPLOY_PATH/data/extensions/alignlayer/"
 
   echo "→ OpenClaw: enabling hook + plugin in openclaw.json..."
-  ssh pi bash <<'REMOTE'
+  ssh "$DEPLOY_HOST" DEPLOY_PATH="$DEPLOY_PATH" bash <<'REMOTE'
     set -euo pipefail
-    CONFIG=/opt/openclaw/data/openclaw.json
+    CONFIG="$DEPLOY_PATH/data/openclaw.json"
 
     # Idempotent: set or update the alignlayer entry.
-    # Uses python3 — jq is not available on the pi host.
+    # Uses python3 — jq is not available on the deploy host.
     python3 - "$CONFIG" <<'PY'
 import json, sys, os
 
@@ -64,16 +76,16 @@ PY
 REMOTE
 
   echo "→ OpenClaw: restarting gateway..."
-  ssh pi "cd /opt/openclaw && docker compose restart"
+  ssh "$DEPLOY_HOST" "cd $DEPLOY_PATH && docker compose restart"
 
   echo "→ OpenClaw: waiting for gateway to come up..."
   sleep 5
 
   echo "→ OpenClaw: checking hook registration..."
-  ssh pi "docker logs --tail 40 openclaw 2>&1 | grep -i alignlayer || echo '  (no alignlayer log lines yet — check for errors below)'"
-  ssh pi "docker logs --tail 20 openclaw 2>&1 | grep -i 'error\|warn\|hook' | tail -10 || true"
+  ssh "$DEPLOY_HOST" "docker logs --tail 40 openclaw 2>&1 | grep -i alignlayer || echo '  (no alignlayer log lines yet — check for errors below)'"
+  ssh "$DEPLOY_HOST" "docker logs --tail 20 openclaw 2>&1 | grep -i 'error\|warn\|hook' | tail -10 || true"
 
-  echo "✓ OpenClaw deploy complete. Traces → /opt/openclaw/data/traces/"
+  echo "✓ OpenClaw deploy complete. Traces → $DEPLOY_PATH/data/traces/"
 }
 
 # ── Claude Code ───────────────────────────────────────────────────────────────

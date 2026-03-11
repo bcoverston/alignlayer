@@ -1,7 +1,7 @@
 ---
 name: alignlayer
 description: "Runtime preference alignment — scores tool calls, surfaces interrupts, captures training traces"
-homepage: https://github.com/bcover/alignlayer
+homepage: https://github.com/bcoverston/alignlayer
 metadata:
   openclaw:
     emoji: "🎯"

@@ -18,10 +18,14 @@ import json
 import re
 import sys
 import hashlib
+import os
 from pathlib import Path
 
 SCORES_CACHE = Path("data/synthetic/scores-cache.jsonl")
-TASK_OUTPUT_DIR = Path("/private/tmp/claude-501/-Users-bcover-Projects-github-com-bcover-alignlayer/tasks")
+TASK_OUTPUT_DIR = Path(os.environ.get(
+    "ALIGNLAYER_TASK_OUTPUT_DIR",
+    "/private/tmp/claude-501/tasks",
+))
 
 
 # ---------------------------------------------------------------------------
