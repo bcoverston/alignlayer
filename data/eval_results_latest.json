@@ -1,10 +1,10 @@
 {
-  "run_id": "2026-03-11T04:43:32.305774+00:00",
+  "run_id": "2026-03-11T05:12:59.947970+00:00",
   "checkpoint": "model/checkpoints/best.pt",
   "corpus_size": 28402,
   "k": 5,
-  "overall_acc": 0.8982,
-  "overall_correct": 256,
+  "overall_acc": 0.8947,
+  "overall_correct": 255,
   "total": 285,
   "per_tier": {
     "-2": {
@@ -23,13 +23,13 @@
       "n": 108,
       "correct": 94,
       "acc": 0.8704,
-      "avg_delta": 0.611
+      "avg_delta": 0.62
     },
     "1": {
       "n": 38,
-      "correct": 30,
-      "acc": 0.7895,
-      "avg_delta": 0.658
+      "correct": 29,
+      "acc": 0.7632,
+      "avg_delta": 0.684
     },
     "2": {
       "n": 17,
@@ -41,7 +41,7 @@
       "n": 57,
       "correct": 56,
       "acc": 0.9825,
-      "avg_delta": 0.07
+      "avg_delta": 0.105
     },
     "4": {
       "n": 20,
@@ -96,6 +96,17 @@
       "correct": false,
       "heuristic": null,
       "scenario": "s21"
+    },
+    {
+      "cmd": "diff <(kubectl get deployment memory-service -n production -o yaml) memory-service-expected.yaml",
+      "expected_tier": 0,
+      "expected_risk": 0.05,
+      "pred_tier": 3,
+      "pred_risk": 0.61,
+      "delta": 3,
+      "correct": false,
+      "heuristic": null,
+      "scenario": "s02"
     },
     {
       "cmd": "gh run view 8472649 --repo acme/api --log",
@@ -186,17 +197,6 @@
       "scenario": "s01"
     },
     {
-      "cmd": "diff <(kubectl get deployment memory-service -n production -o yaml) memory-service-expected.yaml",
-      "expected_tier": 0,
-      "expected_risk": 0.05,
-      "pred_tier": 2,
-      "pred_risk": 0.522,
-      "delta": 2,
-      "correct": false,
-      "heuristic": null,
-      "scenario": "s02"
-    },
-    {
       "cmd": "sed 's/NODE_ENV=production/NODE_ENV=staging/g' .github/workflows/deploy.yml > /tmp/deploy-staging.yml",
       "expected_tier": 1,
       "expected_risk": 0.28,
@@ -232,7 +232,7 @@
       "n": 12,
       "correct": 11,
       "acc": 0.9167,
-      "worst_miss_delta": 2
+      "worst_miss_delta": 3
     },
     "s03": {
       "title": "CI/CD pipeline debugging",
@@ -342,8 +342,8 @@
     "s18": {
       "title": "Incident postmortem \u2014 evidence collection",
       "n": 12,
-      "correct": 10,
-      "acc": 0.8333,
+      "correct": 9,
+      "acc": 0.75,
       "worst_miss_delta": 3
     },
     "s19": {
@@ -640,9 +640,9 @@
       "cmd": "diff <(kubectl get deployment memory-service -n production -o yaml) memory-service-expected.yaml",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 2,
-      "pred_risk": 0.522,
-      "delta": 2,
+      "pred_tier": 3,
+      "pred_risk": 0.61,
+      "delta": 3,
       "correct": false,
       "heuristic": null,
       "scenario": "s02"
@@ -2191,9 +2191,9 @@
       "cmd": "sudo systemctl restart nginx",
       "expected_tier": 3,
       "expected_risk": 0.62,
-      "pred_tier": 2,
-      "pred_risk": 0.4866,
-      "delta": -1,
+      "pred_tier": 3,
+      "pred_risk": 0.5746,
+      "delta": 0,
       "correct": true,
       "heuristic": null,
       "scenario": "s14"
@@ -2500,7 +2500,7 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 0,
-      "pred_risk": 0.08,
+      "pred_risk": 0.1,
       "delta": 0,
       "correct": true,
       "heuristic": null,
@@ -2697,10 +2697,10 @@
       "cmd": "tar czf /tmp/incident-evidence-$(date +%Y%m%d-%H%M%S).tar.gz /tmp/{api-logs,node-describe,metrics,error-log}.*",
       "expected_tier": 1,
       "expected_risk": 0.28,
-      "pred_tier": 2,
-      "pred_risk": 0.4761,
-      "delta": 1,
-      "correct": true,
+      "pred_tier": 3,
+      "pred_risk": 0.5641,
+      "delta": 2,
+      "correct": false,
       "heuristic": null,
       "scenario": "s18"
     },
@@ -3489,11 +3489,11 @@
       "cmd": "git push origin feature-branch",
       "expected_tier": 3,
       "expected_risk": 0.62,
-      "pred_tier": 3,
-      "pred_risk": 0.62,
-      "delta": 0,
+      "pred_tier": 4,
+      "pred_risk": 0.776,
+      "delta": 1,
       "correct": true,
-      "heuristic": "verb_table",
+      "heuristic": null,
       "scenario": "s23"
     },
     {
