@@ -588,7 +588,8 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     (re.compile(r"^kubectl$"),    re.compile(r"^apply\b"),                             3,  0.62, False),
     (re.compile(r"^kubectl$"),    re.compile(r"^(get|describe|logs?|top|explain|diff|version|cluster-info|auth|rollout\s+status|config\s+view)\b"), 0, 0.05, True),
 
-    # git
+    # git — force push before general push (first match wins)
+    (re.compile(r"^git$"),        re.compile(r"^push\b.*--force\b|^push\b.*-f\b"),     4,  0.88, False),
     (re.compile(r"^git$"),        re.compile(r"^push\b"),                             3,  0.62, False),
 
     # aws write ops not covered by terminate/delete pattern
@@ -604,19 +605,50 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
 
     # npm / yarn publish
     (re.compile(r"^(npm|yarn|pnpm)$"), re.compile(r"^(publish|unpublish|deprecate)\b"), 3, 0.68, False),
+
+    # kubectl create/patch in production contexts
+    (re.compile(r"^kubectl$"),    re.compile(r"^(create|patch|replace|set)\b"),          3,  0.62, False),
+
+    # aws s3 rm (especially --recursive)
+    (re.compile(r"^aws$"),        re.compile(r"\bs3\s+rm\b"),                            4,  0.82, False),
+
+    # aws autoscaling / iam destructive ops
+    (re.compile(r"^aws$"),        re.compile(r"\biam\s+delete-\b|\bautoscaling\s+suspend-\b|\bautoscaling\s+delete-\b"), 3, 0.65, False),
+
+    # ssh with destructive remote commands
+    (re.compile(r"^ssh$"),        re.compile(r"(sudo\s+reboot|sudo\s+shutdown|sudo\s+rm\s|rm\s+-rf|sudo\s+systemctl\s+stop|init\s+0)"), 4, 0.88, False),
+    # ssh read-only: cap at T0
+    (re.compile(r"^ssh$"),        re.compile(r"(cat\s|tail\s|head\s|less\s|grep\s|ps\s|top\s|uptime|df\s|free\s|uname|hostname|whoami|id\b|env\b|printenv)"), 0, 0.08, True),
+
+    # docker / podman destructive
+    (re.compile(r"^(docker|podman)$"), re.compile(r"^(system\s+prune|volume\s+prune|image\s+prune)\b"), 2, 0.48, False),
+    (re.compile(r"^(docker|podman)$"), re.compile(r"^push\b"),                           3,  0.62, False),
 ]
 
 _EXFIL_EXEC_RE = re.compile(
     r'eval\s+"\$\(curl'
-    r"|curl\s+.*\|\s*(ba)?sh"
-    r"|wget\s+.*\|\s*(ba)?sh"
+    r"|curl\s+.*\|\s*(sudo\s+)?(ba)?sh"
+    r"|wget\s+.*\|\s*(sudo\s+)?(ba)?sh"
     r"|curl\s+.*\|\s*python"
     r"|base64\s+-d\s*\|\s*(ba)?sh"
     r"|curl\s+.*-d\s+.*@/etc/(passwd|shadow)"
     r"|nc\s+-[a-z]*e\s+/bin/(ba)?sh"
     r"|/dev/tcp/"
     r"|urllib\.request\.urlopen\("
-    r"|requests\.get\(.*\)\.text.*exec\(",
+    r"|requests\.get\(.*\)\.text.*exec\("
+    # download-and-execute chains: wget/curl && ... && ./script
+    r"|wget\s+.*&&.*\./\w+.*\.sh"
+    r"|curl\s+.*-o\s+\S+.*&&.*\./\w+"
+    # npm/pip install from URL (typosquat / supply chain attack)
+    r"|npm\s+install\s+https?://"
+    r"|pip\s+install\s+https?://"
+    # credential exfil via pipe to nc/curl
+    r"|cat\s+.*\.(pem|key|id_rsa|id_ed25519|credentials|env)\s*\|"
+    r"|cat\s+~/\.ssh/\S+\s*\|"
+    # env var credential exfil
+    r"|AWS_ACCESS_KEY_ID=\S+\s+AWS_SECRET_ACCESS_KEY=\S+\s+aws\s+s3\s+(sync|cp)\s+/"
+    # curl posting secrets/tokens to external URLs
+    r"|curl\s+.*Authorization.*\$\w*(SECRET|TOKEN|KEY|PASS)",
     re.IGNORECASE,
 )
 
@@ -659,7 +691,7 @@ def _verb_table_lookup(cmd: str) -> dict | None:
     for tool_re, verb_re, tier, risk, is_cap in _VERB_TABLE:
         if not tool_re.match(tool):
             continue
-        target = remainder if tool in {"aws", "kubectl", "git", "redis-cli"} else first_pos
+        target = remainder if tool in {"aws", "kubectl", "git", "redis-cli", "ssh", "docker", "podman"} else first_pos
         if verb_re.search(target):
             return {"tier": tier, "risk": risk, "is_cap": is_cap, "heuristic": "verb_table"}
     return None
@@ -742,6 +774,23 @@ def _split_compound(cmd: str) -> list[str]:
 # k-NN scoring (inner, no heuristics)
 # ---------------------------------------------------------------------------
 
+def _risk_to_tier(risk: float) -> int:
+    """Deterministic mapping from continuous risk score to tier.
+
+    T-2 is never assigned here — it comes only from the exfil heuristic.
+    T-1 is never assigned here — it comes only from dry-run detection.
+    """
+    if risk < 0.18:
+        return 0   # T0: read-only
+    if risk < 0.38:
+        return 1   # T1: local-write
+    if risk < 0.55:
+        return 2   # T2: destructive-local
+    if risk < 0.74:
+        return 3   # T3: external
+    return 4       # T4: catastrophic
+
+
 def _predict_single(
     cmd: str,
     model: CommandEncoder,
@@ -766,8 +815,7 @@ def _predict_single(
     neighbors = [ref_entries[i] for i in topk.indices.tolist()]
     avg_risk  = sum(n["risk"] for n in neighbors) / k
     avg_blast = sum(n.get("heuristic_blast", 0.0) for n in neighbors) / k
-    votes = [n["tier"] for n in neighbors]
-    tier = max(set(votes), key=votes.count)
+    tier = _risk_to_tier(avg_risk)
     return {
         "command": cmd,
         "risk": round(avg_risk, 4),

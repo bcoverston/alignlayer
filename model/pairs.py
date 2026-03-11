@@ -452,14 +452,10 @@ def save_commands(path: str, tier: int, commands: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 # Tier pairs where adjacent-tier dissimilarity should be explicitly enforced.
-# Risk scores overlap too much at these boundaries for delta-only labeling to work.
-# Only boundaries where risk scores genuinely overlap (gray zone) but tiers are
-# semantically distinct.  T-1↔T0 is excluded: both are low-risk so the similar
-# label is correct — the model shouldn't try to distinguish them by embedding.
-FORCED_DISSIMILAR_BOUNDARIES: set[frozenset[int]] = {
-    frozenset({2, 3}),
-    frozenset({3, 4}),
-}
+# Disabled: forced boundary pairs created contradictory gradient signals
+# that caused the v9 training regression (73.3% vs v7 84.9%).
+# See docs/post-mortem-v9.md for details.
+FORCED_DISSIMILAR_BOUNDARIES: set[frozenset[int]] = set()
 
 
 def _pair_entry(pair_id: int, a: dict, b: dict, label: int, similar: bool,
