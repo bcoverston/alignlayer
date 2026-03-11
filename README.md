@@ -126,7 +126,26 @@ make eval
 
 ### Claude Code
 
-Install as a hook in `~/.claude/settings.json`:
+There are two integration modes: **full scoring** (heuristic risk engine, blocks/allows tool calls) and **observer** (trace collection for ML training, never blocks).
+
+#### Option A: Full scoring hook
+
+The full hook runs the heuristic risk engine on every tool call. Currently observational (always allows), but can be flipped to blocking in `hook.ts`.
+
+```bash
+# 1. Install Node dependencies (tsx is required to run TypeScript hooks)
+cd /path/to/alignlayer
+npm install
+
+# 2. Verify the hook runs
+echo '{"session_id":"test","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hello"},"tool_use_id":"t-001","transcript_path":"","cwd":"","permission_mode":"default"}' \
+  | npx tsx src/claudecode-hook/hook.ts | jq .
+
+# 3. Add to Claude Code settings
+# Edit ~/.claude/settings.json (or use scripts/deploy.sh claudecode)
+```
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -135,15 +154,16 @@ Install as a hook in `~/.claude/settings.json`:
       "matcher": ".*",
       "hooks": [{
         "type": "command",
-        "command": "npx tsx /path/to/alignlayer/src/claudecode-hook/hook.ts",
-        "timeout": 10
+        "command": "npx --prefix /path/to/alignlayer tsx /path/to/alignlayer/src/claudecode-hook/hook.ts",
+        "timeout": 10,
+        "statusMessage": "AlignLayer scoring..."
       }]
     }],
     "PostToolUse": [{
       "matcher": ".*",
       "hooks": [{
         "type": "command",
-        "command": "npx tsx /path/to/alignlayer/src/claudecode-hook/hook.ts",
+        "command": "npx --prefix /path/to/alignlayer tsx /path/to/alignlayer/src/claudecode-hook/hook.ts",
         "timeout": 5,
         "async": true
       }]
@@ -152,11 +172,60 @@ Install as a hook in `~/.claude/settings.json`:
 }
 ```
 
-Or use the lightweight observer hook for trace collection only:
+Replace `/path/to/alignlayer` with the absolute path to your clone. Hooks must use absolute paths — relative paths break in subagent worktrees.
+
+Traces are written to `~/.alignlayer/traces/alignlayer-YYYY-MM-DD.jsonl`. Override with `ALIGNLAYER_TRACES_DIR`.
+
+#### Option B: Observer hook (lightweight)
+
+The observer hook forwards raw tool call events to the scoring server via curl. It never blocks, never modifies tool behavior, and always exits 0. Use this when you want to collect traces for ML training without any risk of interfering with the agent.
 
 ```bash
-# .claude/hooks/observe.sh forwards events to the scoring server
-ALIGNLAYER_URL=http://localhost:8000 .claude/hooks/observe.sh
+# 1. Start the scoring server
+make serve-bg
+
+# 2. Copy the observer hook (or symlink it)
+mkdir -p ~/.claude/hooks
+cp .claude/hooks/observe.sh ~/.claude/hooks/observe.sh
+chmod +x ~/.claude/hooks/observe.sh
+```
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": ".*",
+      "hooks": [{
+        "type": "command",
+        "command": "/Users/you/.claude/hooks/observe.sh",
+        "timeout": 3
+      }]
+    }],
+    "PostToolUse": [{
+      "matcher": ".*",
+      "hooks": [{
+        "type": "command",
+        "command": "/Users/you/.claude/hooks/observe.sh",
+        "timeout": 3
+      }]
+    }]
+  }
+}
+```
+
+The observer sends events to `http://localhost:8000/observe` by default. Override with `ALIGNLAYER_URL`.
+
+#### Restart required
+
+Claude Code loads hook configuration at session start. After editing `settings.json`, restart your Claude Code session for hooks to take effect.
+
+#### Automated setup
+
+```bash
+# Install hooks into ~/.claude/settings.json automatically
+./scripts/deploy.sh claudecode
 ```
 
 ### Scoring Server API
