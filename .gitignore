@@ -1,10 +1,14 @@
 data/traces/
-.claude/settings.local.json
 node_modules/
 dist/
 *.js.map
 model/.venv/
 model/__pycache__/
+__pycache__/
+
+# Claude Code local settings (contains user-specific hook paths)
+.claude/settings.local.json
+.claude/worktrees/
 
 # Large generated data — regenerate with `make pairs`
 data/synthetic/pairs-*.jsonl
@@ -12,3 +16,8 @@ data/synthetic/commands-cache.jsonl
 
 # Corpus cache — large, regenerate with pairs.py pipeline
 data/synthetic/scores-cache.jsonl
+
+# Runtime artifacts
+*.pid
+*.log
+.DS_Store
