@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# AlignLayer pre-commit hook
+# Runs gitleaks on staged changes to catch secrets before they enter history.
+#
+# Install: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+if ! command -v gitleaks &>/dev/null; then
+  echo "⚠  gitleaks not installed — skipping secret scan (brew install gitleaks)"
+  exit 0
+fi
+
+# Scan only staged changes (--staged), not full history
+gitleaks protect --staged --no-banner
+
+echo "✓ gitleaks: no secrets detected"
