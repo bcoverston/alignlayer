@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
-from siamese import CommandEncoder, encode, load_model, MARGIN
+from siamese import CommandEncoder, HybridEncoder, encode, tokenize_word, load_model, MARGIN
 
 SCORES_CACHE = "data/synthetic/scores-cache.jsonl"
 CHECKPOINT   = "model/checkpoints/best.pt"
@@ -48,14 +48,19 @@ def load_corpus(path: str) -> list[dict]:
     return entries
 
 
-def embed_all(entries: list[dict], model: CommandEncoder, dev: torch.device, batch_size: int = 512) -> torch.Tensor:
+def embed_all(entries: list[dict], model: CommandEncoder | HybridEncoder, dev: torch.device, batch_size: int = 512) -> torch.Tensor:
     model.eval()
+    is_hybrid = isinstance(model, HybridEncoder)
     all_embs = []
     with torch.no_grad():
         for i in range(0, len(entries), batch_size):
             batch = entries[i : i + batch_size]
-            x = torch.stack([encode(e["text"]) for e in batch]).to(dev)
-            all_embs.append(model(x).cpu())
+            char_x = torch.stack([encode(e["text"]) for e in batch]).to(dev)
+            if is_hybrid:
+                word_x = torch.stack([tokenize_word(e["text"], model._vocab) for e in batch]).to(dev)
+                all_embs.append(model(char_x, word_x).cpu())
+            else:
+                all_embs.append(model(char_x).cpu())
     return torch.cat(all_embs, dim=0)
 
 
