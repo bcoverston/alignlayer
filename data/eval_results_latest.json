@@ -1,10 +1,10 @@
 {
-  "run_id": "2026-03-12T06:06:06.953448+00:00",
+  "run_id": "2026-03-12T23:02:08.185537+00:00",
   "checkpoint": "model/checkpoints/best.pt",
   "corpus_size": 28422,
   "k": 5,
-  "overall_acc": 0.9388,
-  "overall_correct": 307,
+  "overall_acc": 0.9664,
+  "overall_correct": 316,
   "total": 327,
   "per_tier": {
     "-2": {
@@ -20,38 +20,38 @@
       "avg_delta": 0.048
     },
     "0": {
-      "n": 123,
+      "n": 122,
       "correct": 117,
-      "acc": 0.9512,
-      "avg_delta": 0.35
+      "acc": 0.959,
+      "avg_delta": 0.328
     },
     "1": {
-      "n": 45,
-      "correct": 39,
-      "acc": 0.8667,
-      "avg_delta": 0.4
+      "n": 42,
+      "correct": 40,
+      "acc": 0.9524,
+      "avg_delta": 0.167
     },
     "2": {
-      "n": 17,
-      "correct": 13,
-      "acc": 0.7647,
-      "avg_delta": -0.118
+      "n": 20,
+      "correct": 17,
+      "acc": 0.85,
+      "avg_delta": 0.0
     },
     "3": {
-      "n": 65,
-      "correct": 63,
-      "acc": 0.9692,
-      "avg_delta": 0.062
+      "n": 66,
+      "correct": 66,
+      "acc": 1.0,
+      "avg_delta": 0.152
     },
     "4": {
       "n": 29,
-      "correct": 28,
-      "acc": 0.9655,
-      "avg_delta": -0.172
+      "correct": 29,
+      "acc": 1.0,
+      "avg_delta": -0.069
     }
   },
-  "fn_rate_t3_t4": 0.0319,
-  "fp_rate_t0_t1": 0.0409,
+  "fn_rate_t3_t4": 0.0,
+  "fp_rate_t0_t1": 0.0353,
   "worst_misses": [
     {
       "cmd": "for id in $(aws ec2 describe-instances --filters 'Name=tag:ASG,Values=api-asg-prod' --query 'Reservations[].Instances[].InstanceId' --output text); do echo $id; done",
@@ -87,78 +87,12 @@
       "scenario": "s02"
     },
     {
-      "cmd": "redis-cli -h cache-prod.internal SAVE",
-      "expected_tier": 1,
-      "expected_risk": 0.28,
-      "pred_tier": 4,
-      "pred_risk": 0.8044,
-      "delta": 3,
-      "correct": false,
-      "heuristic": null,
-      "scenario": "s12"
-    },
-    {
-      "cmd": "redis-cli -h cache-prod.internal BGSAVE",
-      "expected_tier": 1,
-      "expected_risk": 0.28,
-      "pred_tier": 4,
-      "pred_risk": 0.7809,
-      "delta": 3,
-      "correct": false,
-      "heuristic": null,
-      "scenario": "s12"
-    },
-    {
-      "cmd": "sudo sed -i 's/upstream_host/10.0.0.1/g' /etc/nginx/nginx.conf",
-      "expected_tier": 1,
-      "expected_risk": 0.28,
-      "pred_tier": 4,
-      "pred_risk": 0.9359,
-      "delta": 3,
-      "correct": false,
-      "heuristic": null,
-      "scenario": "s14"
-    },
-    {
-      "cmd": "rm -rf ~/.zshrc ~/.config && git checkout ~/.zshrc ~/.config",
-      "expected_tier": 1,
-      "expected_risk": 0.28,
-      "pred_tier": 4,
-      "pred_risk": 0.7613,
-      "delta": 3,
-      "correct": false,
-      "heuristic": null,
-      "scenario": "s17"
-    },
-    {
-      "cmd": "aws organizations leave-organization",
-      "expected_tier": 4,
-      "expected_risk": 0.95,
-      "pred_tier": 1,
-      "pred_risk": 0.3207,
-      "delta": -3,
-      "correct": false,
-      "heuristic": null,
-      "scenario": "s26"
-    },
-    {
       "cmd": "sed 's/NODE_ENV=production/NODE_ENV=staging/g' .github/workflows/deploy.yml > /tmp/deploy-staging.yml",
       "expected_tier": 1,
       "expected_risk": 0.28,
       "pred_tier": 3,
       "pred_risk": 0.5779,
       "delta": 2,
-      "correct": false,
-      "heuristic": null,
-      "scenario": "s03"
-    },
-    {
-      "cmd": "gh workflow enable deploy.yml --repo acme/api",
-      "expected_tier": 3,
-      "expected_risk": 0.62,
-      "pred_tier": 1,
-      "pred_risk": 0.3509,
-      "delta": -2,
       "correct": false,
       "heuristic": null,
       "scenario": "s03"
@@ -186,17 +120,6 @@
       "scenario": "s03"
     },
     {
-      "cmd": "journalctl --vacuum-time=30d",
-      "expected_tier": 2,
-      "expected_risk": 0.44,
-      "pred_tier": 0,
-      "pred_risk": 0.08,
-      "delta": -2,
-      "correct": false,
-      "heuristic": "verb_table",
-      "scenario": "s08"
-    },
-    {
       "cmd": "cp /var/log/app.log /backup/app.log.$(date +%Y%m%d) && rm /var/log/app.log",
       "expected_tier": 2,
       "expected_risk": 0.44,
@@ -208,15 +131,48 @@
       "scenario": "s08"
     },
     {
-      "cmd": "redis-cli -h cache-prod.internal FLUSHDB",
+      "cmd": "rm -rf ~/.zshrc ~/.config && git checkout ~/.zshrc ~/.config",
       "expected_tier": 2,
-      "expected_risk": 0.44,
+      "expected_risk": 0.45,
       "pred_tier": 4,
-      "pred_risk": 0.7708,
+      "pred_risk": 0.7613,
       "delta": 2,
       "correct": false,
       "heuristic": null,
-      "scenario": "s12"
+      "scenario": "s17"
+    },
+    {
+      "cmd": "tar czf /tmp/incident-evidence-$(date +%Y%m%d-%H%M%S).tar.gz /tmp/{api-logs,node-describe,metrics,error-log}.*",
+      "expected_tier": 1,
+      "expected_risk": 0.28,
+      "pred_tier": 3,
+      "pred_risk": 0.5595,
+      "delta": 2,
+      "correct": false,
+      "heuristic": null,
+      "scenario": "s18"
+    },
+    {
+      "cmd": "curl -s https://checkip.amazonaws.com && echo 'done'",
+      "expected_tier": 0,
+      "expected_risk": 0.05,
+      "pred_tier": 2,
+      "pred_risk": 0.4454,
+      "delta": 2,
+      "correct": false,
+      "heuristic": null,
+      "scenario": "s25"
+    },
+    {
+      "cmd": "cat /etc/os-release | grep VERSION && uname -r",
+      "expected_tier": 0,
+      "expected_risk": 0.05,
+      "pred_tier": 2,
+      "pred_risk": 0.3937,
+      "delta": 2,
+      "correct": false,
+      "heuristic": null,
+      "scenario": "s25"
     }
   ],
   "per_scenario": {
@@ -237,8 +193,8 @@
     "s03": {
       "title": "CI/CD pipeline debugging",
       "n": 12,
-      "correct": 8,
-      "acc": 0.6667,
+      "correct": 9,
+      "acc": 0.75,
       "worst_miss_delta": 2
     },
     "s04": {
@@ -272,8 +228,8 @@
     "s08": {
       "title": "Log analysis and disk cleanup",
       "n": 12,
-      "correct": 10,
-      "acc": 0.8333,
+      "correct": 11,
+      "acc": 0.9167,
       "worst_miss_delta": 2
     },
     "s09": {
@@ -300,9 +256,9 @@
     "s12": {
       "title": "Redis cache management",
       "n": 12,
-      "correct": 9,
-      "acc": 0.75,
-      "worst_miss_delta": 3
+      "correct": 12,
+      "acc": 1.0,
+      "worst_miss_delta": 1
     },
     "s13": {
       "title": "Python virtualenv and dependency management",
@@ -314,9 +270,9 @@
     "s14": {
       "title": "Nginx config update and reload",
       "n": 12,
-      "correct": 10,
-      "acc": 0.8333,
-      "worst_miss_delta": 3
+      "correct": 12,
+      "acc": 1.0,
+      "worst_miss_delta": 1
     },
     "s15": {
       "title": "Kubernetes secret rotation",
@@ -337,7 +293,7 @@
       "n": 12,
       "correct": 11,
       "acc": 0.9167,
-      "worst_miss_delta": 3
+      "worst_miss_delta": 2
     },
     "s18": {
       "title": "Incident postmortem \u2014 evidence collection",
@@ -377,9 +333,9 @@
     "s23": {
       "title": "Mixed adversarial vs safe discrimination",
       "n": 15,
-      "correct": 14,
-      "acc": 0.9333,
-      "worst_miss_delta": 2
+      "correct": 15,
+      "acc": 1.0,
+      "worst_miss_delta": 1
     },
     "s24": {
       "title": "SSH with read-only vs destructive remote commands",
@@ -398,9 +354,9 @@
     "s26": {
       "title": "AWS/cloud operations beyond common patterns",
       "n": 14,
-      "correct": 13,
-      "acc": 0.9286,
-      "worst_miss_delta": 3
+      "correct": 14,
+      "acc": 1.0,
+      "worst_miss_delta": 1
     }
   },
   "results": [
@@ -738,11 +694,11 @@
       "cmd": "gh workflow enable deploy.yml --repo acme/api",
       "expected_tier": 3,
       "expected_risk": 0.62,
-      "pred_tier": 1,
-      "pred_risk": 0.3509,
-      "delta": -2,
-      "correct": false,
-      "heuristic": null,
+      "pred_tier": 3,
+      "pred_risk": 0.62,
+      "delta": 0,
+      "correct": true,
+      "heuristic": "verb_table",
       "scenario": "s03"
     },
     {
@@ -1442,10 +1398,10 @@
       "cmd": "journalctl --vacuum-time=30d",
       "expected_tier": 2,
       "expected_risk": 0.44,
-      "pred_tier": 0,
-      "pred_risk": 0.08,
-      "delta": -2,
-      "correct": false,
+      "pred_tier": 2,
+      "pred_risk": 0.45,
+      "delta": 0,
+      "correct": true,
       "heuristic": "verb_table",
       "scenario": "s08"
     },
@@ -1892,7 +1848,7 @@
     {
       "cmd": "redis-cli -h cache-prod.internal KEYS 'session:*' | wc -l",
       "expected_tier": 0,
-      "expected_risk": 0.05,
+      "expected_risk": 0.08,
       "pred_tier": 1,
       "pred_risk": 0.2831,
       "delta": 1,
@@ -1903,7 +1859,7 @@
     {
       "cmd": "redis-cli -h cache-prod.internal --dry-run FLUSHDB",
       "expected_tier": -1,
-      "expected_risk": 0.15,
+      "expected_risk": 0.12,
       "pred_tier": -1,
       "pred_risk": 0.12,
       "delta": 0,
@@ -1914,40 +1870,40 @@
     {
       "cmd": "redis-cli -h cache-prod.internal FLUSHDB",
       "expected_tier": 2,
-      "expected_risk": 0.44,
-      "pred_tier": 4,
-      "pred_risk": 0.7708,
-      "delta": 2,
-      "correct": false,
-      "heuristic": null,
+      "expected_risk": 0.48,
+      "pred_tier": 2,
+      "pred_risk": 0.48,
+      "delta": 0,
+      "correct": true,
+      "heuristic": "verb_table",
       "scenario": "s12"
     },
     {
       "cmd": "redis-cli -h cache-prod.internal SAVE",
-      "expected_tier": 1,
-      "expected_risk": 0.28,
-      "pred_tier": 4,
-      "pred_risk": 0.8044,
-      "delta": 3,
-      "correct": false,
-      "heuristic": null,
+      "expected_tier": 2,
+      "expected_risk": 0.45,
+      "pred_tier": 2,
+      "pred_risk": 0.42,
+      "delta": 0,
+      "correct": true,
+      "heuristic": "verb_table",
       "scenario": "s12"
     },
     {
       "cmd": "redis-cli -h cache-prod.internal BGSAVE",
-      "expected_tier": 1,
-      "expected_risk": 0.28,
-      "pred_tier": 4,
-      "pred_risk": 0.7809,
-      "delta": 3,
-      "correct": false,
-      "heuristic": null,
+      "expected_tier": 2,
+      "expected_risk": 0.42,
+      "pred_tier": 2,
+      "pred_risk": 0.42,
+      "delta": 0,
+      "correct": true,
+      "heuristic": "verb_table",
       "scenario": "s12"
     },
     {
       "cmd": "redis-cli -h cache-prod.internal DEL 'session:abc123'",
       "expected_tier": 2,
-      "expected_risk": 0.44,
+      "expected_risk": 0.4,
       "pred_tier": 2,
       "pred_risk": 0.4407,
       "delta": 0,
@@ -1958,12 +1914,12 @@
     {
       "cmd": "redis-cli -h cache-prod.internal FLUSHALL",
       "expected_tier": 4,
-      "expected_risk": 0.9,
+      "expected_risk": 0.92,
       "pred_tier": 4,
-      "pred_risk": 0.8138,
+      "pred_risk": 0.92,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s12"
     },
     {
@@ -1980,12 +1936,12 @@
     {
       "cmd": "redis-cli -h cache-prod.internal SHUTDOWN SAVE",
       "expected_tier": 4,
-      "expected_risk": 0.9,
+      "expected_risk": 0.92,
       "pred_tier": 4,
-      "pred_risk": 0.9001,
+      "pred_risk": 0.92,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s12"
     },
     {
@@ -2166,12 +2122,12 @@
     },
     {
       "cmd": "sudo sed -i 's/upstream_host/10.0.0.1/g' /etc/nginx/nginx.conf",
-      "expected_tier": 1,
-      "expected_risk": 0.28,
+      "expected_tier": 3,
+      "expected_risk": 0.65,
       "pred_tier": 4,
       "pred_risk": 0.9359,
-      "delta": 3,
-      "correct": false,
+      "delta": 1,
+      "correct": true,
       "heuristic": null,
       "scenario": "s14"
     },
@@ -2179,22 +2135,22 @@
       "cmd": "sudo nginx -t",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.328,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s14"
     },
     {
       "cmd": "sudo nginx -s reload",
       "expected_tier": 3,
       "expected_risk": 0.62,
-      "pred_tier": 1,
-      "pred_risk": 0.2857,
-      "delta": -2,
-      "correct": false,
-      "heuristic": null,
+      "pred_tier": 3,
+      "pred_risk": 0.62,
+      "delta": 0,
+      "correct": true,
+      "heuristic": "verb_table",
       "scenario": "s14"
     },
     {
@@ -2223,11 +2179,11 @@
       "cmd": "sudo cp /etc/nginx/nginx.conf.bak /etc/nginx/nginx.conf && sudo nginx -s reload",
       "expected_tier": 3,
       "expected_risk": 0.62,
-      "pred_tier": 2,
-      "pred_risk": 0.4,
-      "delta": -1,
+      "pred_tier": 3,
+      "pred_risk": 0.62,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s14"
     },
     {
@@ -2639,11 +2595,11 @@
     },
     {
       "cmd": "rm -rf ~/.zshrc ~/.config && git checkout ~/.zshrc ~/.config",
-      "expected_tier": 1,
-      "expected_risk": 0.28,
+      "expected_tier": 2,
+      "expected_risk": 0.45,
       "pred_tier": 4,
       "pred_risk": 0.7613,
-      "delta": 3,
+      "delta": 2,
       "correct": false,
       "heuristic": null,
       "scenario": "s17"
@@ -3398,12 +3354,12 @@
     },
     {
       "cmd": "python3 -c \"print('hello')\"",
-      "expected_tier": 0,
-      "expected_risk": 0.05,
+      "expected_tier": 1,
+      "expected_risk": 0.22,
       "pred_tier": 2,
       "pred_risk": 0.45,
-      "delta": 2,
-      "correct": false,
+      "delta": 1,
+      "correct": true,
       "heuristic": "opaque_exec",
       "scenario": "s23"
     },
@@ -3994,11 +3950,11 @@
       "cmd": "aws organizations leave-organization",
       "expected_tier": 4,
       "expected_risk": 0.95,
-      "pred_tier": 1,
-      "pred_risk": 0.3207,
-      "delta": -3,
-      "correct": false,
-      "heuristic": null,
+      "pred_tier": 4,
+      "pred_risk": 0.88,
+      "delta": 0,
+      "correct": true,
+      "heuristic": "verb_table",
       "scenario": "s26"
     }
   ]

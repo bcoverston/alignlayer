@@ -575,8 +575,11 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
 
     # redis-cli — verb may appear after -h host -p 6379 etc., so match anywhere
     # in the remainder (not anchored to start).
-    (re.compile(r"^redis-cli$"),  re.compile(r"\b(flushdb|flushall)\b", re.I),         2,  0.48, False),
-    (re.compile(r"^redis-cli$"),  re.compile(r"\b(del|unlink|expire|persist|rename|save|bgsave|bgrewriteaof|config\s+set|shutdown)\b", re.I), 2, 0.40, False),
+    (re.compile(r"^redis-cli$"),  re.compile(r"\b(flushall|shutdown)\b", re.I),         4,  0.92, False),
+    (re.compile(r"^redis-cli$"),  re.compile(r"\bflushdb\b", re.I),                      2,  0.48, True),
+    (re.compile(r"^redis-cli$"),  re.compile(r"\b(del|unlink|expire|persist|rename)\b", re.I), 2, 0.40, False),
+    (re.compile(r"^redis-cli$"),  re.compile(r"\b(save|bgsave|bgrewriteaof)\b", re.I),   2,  0.42, True),
+    (re.compile(r"^redis-cli$"),  re.compile(r"\b(config\s+set)\b", re.I),               3,  0.62, False),
     (re.compile(r"^redis-cli$"),  re.compile(r"\b(get|keys|scan|info|dbsize|ttl|type|llen|smembers|hgetall|zrange|config\s+get|ping)\b", re.I), 0, 0.05, True),
 
     # aws — match service+operation in the remainder
@@ -612,8 +615,9 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # aws s3 rm (especially --recursive)
     (re.compile(r"^aws$"),        re.compile(r"\bs3\s+rm\b"),                            4,  0.82, False),
 
-    # aws autoscaling / iam destructive ops
+    # aws autoscaling / iam / organizations destructive ops
     (re.compile(r"^aws$"),        re.compile(r"\biam\s+delete-\b|\bautoscaling\s+suspend-\b|\bautoscaling\s+delete-\b"), 3, 0.65, False),
+    (re.compile(r"^aws$"),        re.compile(r"\borganizations\s+leave-organization\b"),   4,  0.88, False),
 
     # ssh with destructive remote commands
     (re.compile(r"^ssh$"),        re.compile(r"(sudo\s+reboot|sudo\s+shutdown|sudo\s+rm\s|rm\s+-rf|sudo\s+systemctl\s+stop|init\s+0)"), 4, 0.88, False),
@@ -631,7 +635,8 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # psql read-only: metacommands (\dt, \dl, \l, \d+) and SELECT
     (re.compile(r"^psql$"),       re.compile(r"-c\s+.*\\\\?d[tl+]|SELECT\s", re.I),      0,  0.08, True),
 
-    # gh (GitHub CLI) — read-only commands
+    # gh (GitHub CLI)
+    (re.compile(r"^gh$"),         re.compile(r"^workflow\s+(enable|disable)\b"),           3,  0.62, False),
     (re.compile(r"^gh$"),         re.compile(r"^(run\s+view|pr\s+(view|list|status|checks)|issue\s+(view|list)|repo\s+view)\b"), 0, 0.05, True),
 
     # git read-only
@@ -640,7 +645,8 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # find without -delete or destructive -exec is read-only
     (re.compile(r"^find$"),       re.compile(r"^(?!.*(-delete|xargs\s+rm|-exec\s+(rm|mv|chmod|chown)))"), 0, 0.08, True),
 
-    # nginx -T (dump config), journalctl (read logs), ssh-keygen -l (fingerprint)
+    # nginx: -T (dump config) is read-only, -s reload/stop is risky
+    (re.compile(r"^nginx$"),      re.compile(r"-s\s+(reload|stop|quit)"),                  3,  0.62, False),
     (re.compile(r"^nginx$"),      re.compile(r"^-[tT]\b"),                               0,  0.05, True),
     (re.compile(r"^journalctl$"), re.compile(r"--vacuum"), 2, 0.45, False),
     (re.compile(r"^journalctl$"), re.compile(r""), 0, 0.08, True),
@@ -699,14 +705,32 @@ _OPAQUE_EXEC_RE = re.compile(
 )
 
 
+_CMD_PREFIXES = {"sudo", "env", "nice", "nohup", "caffeinate", "time"}
+
 def _parse_cli_verb(cmd: str) -> tuple[str, str]:
-    """Return (tool, remainder) from a command string."""
+    """Return (tool, remainder) from a command string, stripping sudo/env/etc."""
     try:
         parts = shlex.split(cmd)
     except ValueError:
         parts = cmd.split()
     if not parts:
         return "", ""
+    # Strip common command prefixes (sudo, env, nice, etc.) and their flags
+    while len(parts) > 1:
+        low = parts[0].lower()
+        if low in _CMD_PREFIXES:
+            parts = parts[1:]
+            # Skip flags belonging to the prefix (e.g., nice -n 10, sudo -u user)
+            while len(parts) > 1 and parts[0].startswith("-"):
+                parts = parts[1:]
+                # Skip flag argument if numeric (nice -n 10)
+                if len(parts) > 1 and parts[0].isdigit():
+                    parts = parts[1:]
+        elif "=" in low and not low.startswith("-"):
+            # Skip env var assignments (FOO=bar cmd ...)
+            parts = parts[1:]
+        else:
+            break
     tool = parts[0].lower()
     remainder = " ".join(parts[1:]).lower()
     return tool, remainder
@@ -727,7 +751,7 @@ def _verb_table_lookup(cmd: str) -> dict | None:
         target = remainder if tool in {
             "aws", "kubectl", "git", "redis-cli", "ssh", "docker", "podman",
             "find", "gh", "psql", "terraform", "nginx", "ssh-keygen", "ssh-keyscan",
-            "pip", "pip3", "npm", "yarn", "pnpm",
+            "pip", "pip3", "npm", "yarn", "pnpm", "journalctl",
         } else first_pos
         if verb_re.search(target):
             return {"tier": tier, "risk": risk, "is_cap": is_cap, "heuristic": "verb_table"}
