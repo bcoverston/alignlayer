@@ -656,6 +656,12 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # pip/npm local install (not from URL) — T1 cap
     (re.compile(r"^pip3?$"),      re.compile(r"^install\s+(?!https?://)"),                 1,  0.30, True),
     (re.compile(r"^(npm|yarn|pnpm)$"), re.compile(r"^install\b"),                         1,  0.30, True),
+
+    # Pure filter commands — T0 cap (these only process stdin, never write)
+    (re.compile(r"^(grep|egrep|fgrep|rg)$"), re.compile(r""),                             0,  0.05, True),
+    (re.compile(r"^(head|tail|wc|sort|uniq|cut|tr|less|more)$"), re.compile(r""),          0,  0.05, True),
+    (re.compile(r"^(awk|jq|yq|column|fmt|fold)$"), re.compile(r""),                       0,  0.05, True),
+    (re.compile(r"^(uname|whoami|hostname|uptime|id|pwd|true|false)$"), re.compile(r""),   0,  0.03, True),
 ]
 
 _EXFIL_EXEC_RE = re.compile(

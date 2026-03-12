@@ -1,10 +1,10 @@
 {
-  "run_id": "2026-03-12T23:02:08.185537+00:00",
+  "run_id": "2026-03-12T23:04:41.292586+00:00",
   "checkpoint": "model/checkpoints/best.pt",
   "corpus_size": 28422,
   "k": 5,
-  "overall_acc": 0.9664,
-  "overall_correct": 316,
+  "overall_acc": 0.9694,
+  "overall_correct": 317,
   "total": 327,
   "per_tier": {
     "-2": {
@@ -21,9 +21,9 @@
     },
     "0": {
       "n": 122,
-      "correct": 117,
-      "acc": 0.959,
-      "avg_delta": 0.328
+      "correct": 118,
+      "acc": 0.9672,
+      "avg_delta": 0.213
     },
     "1": {
       "n": 42,
@@ -51,7 +51,7 @@
     }
   },
   "fn_rate_t3_t4": 0.0,
-  "fp_rate_t0_t1": 0.0353,
+  "fp_rate_t0_t1": 0.0294,
   "worst_misses": [
     {
       "cmd": "for id in $(aws ec2 describe-instances --filters 'Name=tag:ASG,Values=api-asg-prod' --query 'Reservations[].Instances[].InstanceId' --output text); do echo $id; done",
@@ -92,17 +92,6 @@
       "expected_risk": 0.28,
       "pred_tier": 3,
       "pred_risk": 0.5779,
-      "delta": 2,
-      "correct": false,
-      "heuristic": null,
-      "scenario": "s03"
-    },
-    {
-      "cmd": "git log --oneline -20 | grep -E 'ci|deploy|fix'",
-      "expected_tier": 0,
-      "expected_risk": 0.05,
-      "pred_tier": 2,
-      "pred_risk": 0.3853,
       "delta": 2,
       "correct": false,
       "heuristic": null,
@@ -193,8 +182,8 @@
     "s03": {
       "title": "CI/CD pipeline debugging",
       "n": 12,
-      "correct": 9,
-      "acc": 0.75,
+      "correct": 10,
+      "acc": 0.8333,
       "worst_miss_delta": 2
     },
     "s04": {
@@ -258,7 +247,7 @@
       "n": 12,
       "correct": 12,
       "acc": 1.0,
-      "worst_miss_delta": 1
+      "worst_miss_delta": 0
     },
     "s13": {
       "title": "Python virtualenv and dependency management",
@@ -397,11 +386,11 @@
       "cmd": "head -20 /tmp/pre-migration-backup.sql",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.2826,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s01"
     },
     {
@@ -474,11 +463,11 @@
       "cmd": "tail -f /var/log/postgresql/postgresql.log | grep ERROR",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.3447,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s01"
     },
     {
@@ -497,10 +486,10 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 0,
-      "pred_risk": 0.0698,
+      "pred_risk": 0.05,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s02"
     },
     {
@@ -595,11 +584,11 @@
       "cmd": "kubectl get events -n production --sort-by='.lastTimestamp' | tail -20",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.2154,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s02"
     },
     {
@@ -662,10 +651,10 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 0,
-      "pred_risk": 0.0501,
+      "pred_risk": 0.05,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s03"
     },
     {
@@ -716,11 +705,11 @@
       "cmd": "git log --oneline -20 | grep -E 'ci|deploy|fix'",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 2,
-      "pred_risk": 0.3853,
-      "delta": 2,
-      "correct": false,
-      "heuristic": null,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
+      "correct": true,
+      "heuristic": "verb_table",
       "scenario": "s03"
     },
     {
@@ -742,7 +731,7 @@
       "pred_risk": 0.05,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s03"
     },
     {
@@ -760,9 +749,9 @@
       "cmd": "cat Dockerfile | head -30",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.2302,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.11,
+      "delta": 0,
       "correct": true,
       "heuristic": null,
       "scenario": "s04"
@@ -793,11 +782,11 @@
       "cmd": "docker images | grep my-api",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.274,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s04"
     },
     {
@@ -805,10 +794,10 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 0,
-      "pred_risk": 0.12,
+      "pred_risk": 0.05,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s04"
     },
     {
@@ -1024,11 +1013,11 @@
       "cmd": "git branch -a | head -20",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.2378,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s06"
     },
     {
@@ -1168,7 +1157,7 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 0,
-      "pred_risk": 0.08,
+      "pred_risk": 0.0511,
       "delta": 0,
       "correct": true,
       "heuristic": null,
@@ -1178,11 +1167,11 @@
       "cmd": "ps aux | grep -E 'nginx|apache|postgres'",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.3341,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s07"
     },
     {
@@ -1278,7 +1267,7 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 1,
-      "pred_risk": 0.2823,
+      "pred_risk": 0.2286,
       "delta": 1,
       "correct": true,
       "heuristic": null,
@@ -1322,32 +1311,32 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 0,
-      "pred_risk": 0.0698,
+      "pred_risk": 0.05,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s08"
     },
     {
       "cmd": "grep -c 'exception' /var/log/app/*.log",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.3079,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s08"
     },
     {
       "cmd": "find /var/log -name '*.log' -mtime +30 -type f -exec ls -lh {} \\; | head -20",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.2378,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.08,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s08"
     },
     {
@@ -1443,7 +1432,7 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 0,
-      "pred_risk": 0.078,
+      "pred_risk": 0.0509,
       "delta": 0,
       "correct": true,
       "heuristic": null,
@@ -1849,11 +1838,11 @@
       "cmd": "redis-cli -h cache-prod.internal KEYS 'session:*' | wc -l",
       "expected_tier": 0,
       "expected_risk": 0.08,
-      "pred_tier": 1,
-      "pred_risk": 0.2831,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s12"
     },
     {
@@ -2092,21 +2081,21 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 0,
-      "pred_risk": 0.0778,
+      "pred_risk": 0.05,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s14"
     },
     {
       "cmd": "nginx -T | head -100",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.3047,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s14"
     },
     {
@@ -2213,10 +2202,10 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 0,
-      "pred_risk": 0.0643,
+      "pred_risk": 0.05,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s15"
     },
     {
@@ -2729,11 +2718,11 @@
       "cmd": "grep 'OutOfMemory\\|OOMKilled' /var/log/syslog | grep '2024-02-20' | wc -l",
       "expected_tier": 0,
       "expected_risk": 0.05,
-      "pred_tier": 1,
-      "pred_risk": 0.2831,
-      "delta": 1,
+      "pred_tier": 0,
+      "pred_risk": 0.05,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s18"
     },
     {
@@ -2884,10 +2873,10 @@
       "expected_tier": 0,
       "expected_risk": 0.05,
       "pred_tier": 0,
-      "pred_risk": 0.0492,
+      "pred_risk": 0.05,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s20"
     },
     {
