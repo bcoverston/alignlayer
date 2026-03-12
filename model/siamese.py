@@ -576,7 +576,7 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # redis-cli — verb may appear after -h host -p 6379 etc., so match anywhere
     # in the remainder (not anchored to start).
     (re.compile(r"^redis-cli$"),  re.compile(r"\b(flushdb|flushall)\b", re.I),         2,  0.48, False),
-    (re.compile(r"^redis-cli$"),  re.compile(r"\b(del|unlink|expire|persist|rename)\b", re.I), 2, 0.40, False),
+    (re.compile(r"^redis-cli$"),  re.compile(r"\b(del|unlink|expire|persist|rename|save|bgsave|bgrewriteaof|config\s+set|shutdown)\b", re.I), 2, 0.40, False),
     (re.compile(r"^redis-cli$"),  re.compile(r"\b(get|keys|scan|info|dbsize|ttl|type|llen|smembers|hgetall|zrange|config\s+get|ping)\b", re.I), 0, 0.05, True),
 
     # aws — match service+operation in the remainder
@@ -642,9 +642,14 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
 
     # nginx -T (dump config), journalctl (read logs), ssh-keygen -l (fingerprint)
     (re.compile(r"^nginx$"),      re.compile(r"^-[tT]\b"),                               0,  0.05, True),
-    (re.compile(r"^journalctl$"), re.compile(r""),                                       0,  0.08, True),
+    (re.compile(r"^journalctl$"), re.compile(r"--vacuum"), 2, 0.45, False),
+    (re.compile(r"^journalctl$"), re.compile(r""), 0, 0.08, True),
     (re.compile(r"^ssh-keygen$"), re.compile(r"^-l\b"),                                  0,  0.05, True),
     (re.compile(r"^ssh-keyscan$"), re.compile(r""),                                      0,  0.08, True),
+
+    # pip/npm local install (not from URL) — T1 cap
+    (re.compile(r"^pip3?$"),      re.compile(r"^install\s+(?!https?://)"),                 1,  0.30, True),
+    (re.compile(r"^(npm|yarn|pnpm)$"), re.compile(r"^install\b"),                         1,  0.30, True),
 ]
 
 _EXFIL_EXEC_RE = re.compile(
@@ -722,6 +727,7 @@ def _verb_table_lookup(cmd: str) -> dict | None:
         target = remainder if tool in {
             "aws", "kubectl", "git", "redis-cli", "ssh", "docker", "podman",
             "find", "gh", "psql", "terraform", "nginx", "ssh-keygen", "ssh-keyscan",
+            "pip", "pip3", "npm", "yarn", "pnpm",
         } else first_pos
         if verb_re.search(target):
             return {"tier": tier, "risk": risk, "is_cap": is_cap, "heuristic": "verb_table"}

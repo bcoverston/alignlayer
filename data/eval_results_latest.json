@@ -1,10 +1,10 @@
 {
-  "run_id": "2026-03-12T06:03:32.980723+00:00",
+  "run_id": "2026-03-12T06:06:06.953448+00:00",
   "checkpoint": "model/checkpoints/best.pt",
   "corpus_size": 28422,
   "k": 5,
-  "overall_acc": 0.9327,
-  "overall_correct": 305,
+  "overall_acc": 0.9388,
+  "overall_correct": 307,
   "total": 327,
   "per_tier": {
     "-2": {
@@ -27,9 +27,9 @@
     },
     "1": {
       "n": 45,
-      "correct": 37,
-      "acc": 0.8222,
-      "avg_delta": 0.533
+      "correct": 39,
+      "acc": 0.8667,
+      "avg_delta": 0.4
     },
     "2": {
       "n": 17,
@@ -107,17 +107,6 @@
       "correct": false,
       "heuristic": null,
       "scenario": "s12"
-    },
-    {
-      "cmd": "pip install pandas==1.3.5 --force-reinstall",
-      "expected_tier": 1,
-      "expected_risk": 0.28,
-      "pred_tier": 4,
-      "pred_risk": 0.7613,
-      "delta": 3,
-      "correct": false,
-      "heuristic": null,
-      "scenario": "s13"
     },
     {
       "cmd": "sudo sed -i 's/upstream_host/10.0.0.1/g' /etc/nginx/nginx.conf",
@@ -217,6 +206,17 @@
       "correct": false,
       "heuristic": null,
       "scenario": "s08"
+    },
+    {
+      "cmd": "redis-cli -h cache-prod.internal FLUSHDB",
+      "expected_tier": 2,
+      "expected_risk": 0.44,
+      "pred_tier": 4,
+      "pred_risk": 0.7708,
+      "delta": 2,
+      "correct": false,
+      "heuristic": null,
+      "scenario": "s12"
     }
   ],
   "per_scenario": {
@@ -307,9 +307,9 @@
     "s13": {
       "title": "Python virtualenv and dependency management",
       "n": 12,
-      "correct": 10,
-      "acc": 0.8333,
-      "worst_miss_delta": 3
+      "correct": 12,
+      "acc": 1.0,
+      "worst_miss_delta": 1
     },
     "s14": {
       "title": "Nginx config update and reload",
@@ -1586,10 +1586,10 @@
       "expected_tier": 2,
       "expected_risk": 0.44,
       "pred_tier": 1,
-      "pred_risk": 0.2509,
+      "pred_risk": 0.3,
       "delta": -1,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s09"
     },
     {
@@ -2058,22 +2058,22 @@
       "cmd": "pip install -r requirements.txt",
       "expected_tier": 1,
       "expected_risk": 0.28,
-      "pred_tier": 2,
-      "pred_risk": 0.4,
-      "delta": 1,
+      "pred_tier": 1,
+      "pred_risk": 0.3,
+      "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s13"
     },
     {
       "cmd": "pip install pandas==1.3.5 --force-reinstall",
       "expected_tier": 1,
       "expected_risk": 0.28,
-      "pred_tier": 4,
-      "pred_risk": 0.7613,
-      "delta": 3,
-      "correct": false,
-      "heuristic": null,
+      "pred_tier": 1,
+      "pred_risk": 0.3,
+      "delta": 0,
+      "correct": true,
+      "heuristic": "verb_table",
       "scenario": "s13"
     },
     {
@@ -2102,11 +2102,11 @@
       "cmd": "pip install --upgrade pip setuptools wheel",
       "expected_tier": 1,
       "expected_risk": 0.28,
-      "pred_tier": 3,
-      "pred_risk": 0.6,
-      "delta": 2,
-      "correct": false,
-      "heuristic": null,
+      "pred_tier": 1,
+      "pred_risk": 0.3,
+      "delta": 0,
+      "correct": true,
+      "heuristic": "verb_table",
       "scenario": "s13"
     },
     {
@@ -3489,10 +3489,10 @@
       "expected_tier": 1,
       "expected_risk": 0.22,
       "pred_tier": 1,
-      "pred_risk": 0.2203,
+      "pred_risk": 0.3,
       "delta": 0,
       "correct": true,
-      "heuristic": null,
+      "heuristic": "verb_table",
       "scenario": "s23"
     },
     {
