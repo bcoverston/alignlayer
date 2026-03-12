@@ -623,6 +623,28 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # docker / podman destructive
     (re.compile(r"^(docker|podman)$"), re.compile(r"^(system\s+prune|volume\s+prune|image\s+prune)\b"), 2, 0.48, False),
     (re.compile(r"^(docker|podman)$"), re.compile(r"^push\b"),                           3,  0.62, False),
+    (re.compile(r"^(docker|podman)$"), re.compile(r"^(ps|images|inspect|logs|stats|top|port|diff|history|version)\b"), 0, 0.05, True),
+
+    # terraform state show/list — read-only inspection
+    (re.compile(r"^terraform$"),  re.compile(r"^state\s+show\b"),                        0,  0.08, True),
+
+    # psql read-only: metacommands (\dt, \dl, \l, \d+) and SELECT
+    (re.compile(r"^psql$"),       re.compile(r"-c\s+.*\\\\?d[tl+]|SELECT\s", re.I),      0,  0.08, True),
+
+    # gh (GitHub CLI) — read-only commands
+    (re.compile(r"^gh$"),         re.compile(r"^(run\s+view|pr\s+(view|list|status|checks)|issue\s+(view|list)|repo\s+view)\b"), 0, 0.05, True),
+
+    # git read-only
+    (re.compile(r"^git$"),        re.compile(r"^(log|diff|show|status|branch\s+-[avr]|tag\s+-l|remote\s+-v|stash\s+list)\b"), 0, 0.05, True),
+
+    # find without -delete or destructive -exec is read-only
+    (re.compile(r"^find$"),       re.compile(r"^(?!.*(-delete|xargs\s+rm|-exec\s+(rm|mv|chmod|chown)))"), 0, 0.08, True),
+
+    # nginx -T (dump config), journalctl (read logs), ssh-keygen -l (fingerprint)
+    (re.compile(r"^nginx$"),      re.compile(r"^-[tT]\b"),                               0,  0.05, True),
+    (re.compile(r"^journalctl$"), re.compile(r""),                                       0,  0.08, True),
+    (re.compile(r"^ssh-keygen$"), re.compile(r"^-l\b"),                                  0,  0.05, True),
+    (re.compile(r"^ssh-keyscan$"), re.compile(r""),                                      0,  0.08, True),
 ]
 
 _EXFIL_EXEC_RE = re.compile(
@@ -693,7 +715,10 @@ def _verb_table_lookup(cmd: str) -> dict | None:
     for tool_re, verb_re, tier, risk, is_cap in _VERB_TABLE:
         if not tool_re.match(tool):
             continue
-        target = remainder if tool in {"aws", "kubectl", "git", "redis-cli", "ssh", "docker", "podman"} else first_pos
+        target = remainder if tool in {
+            "aws", "kubectl", "git", "redis-cli", "ssh", "docker", "podman",
+            "find", "gh", "psql", "terraform", "nginx", "ssh-keygen", "ssh-keyscan",
+        } else first_pos
         if verb_re.search(target):
             return {"tier": tier, "risk": risk, "is_cap": is_cap, "heuristic": "verb_table"}
     return None
@@ -815,8 +840,15 @@ def _predict_single(
     dists = torch.norm(ref_embs - emb.unsqueeze(0), dim=1)
     topk = dists.topk(k, largest=False)
     neighbors = [ref_entries[i] for i in topk.indices.tolist()]
-    avg_risk  = sum(n["risk"] for n in neighbors) / k
-    avg_blast = sum(n.get("heuristic_blast", 0.0) for n in neighbors) / k
+    top_dists = topk.values.tolist()
+
+    # Inverse-distance weighting: closer neighbors get more influence.
+    # Clamp minimum distance to avoid division by zero for exact matches.
+    eps = 1e-6
+    weights = [1.0 / max(d, eps) for d in top_dists]
+    w_sum = sum(weights)
+    avg_risk  = sum(w * n["risk"] for w, n in zip(weights, neighbors)) / w_sum
+    avg_blast = sum(w * n.get("heuristic_blast", 0.0) for w, n in zip(weights, neighbors)) / w_sum
     tier = _risk_to_tier(avg_risk)
     return {
         "command": cmd,
