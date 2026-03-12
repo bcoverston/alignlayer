@@ -666,6 +666,10 @@ _EXFIL_EXEC_RE = re.compile(
     # npm/pip install from URL (typosquat / supply chain attack)
     r"|npm\s+install\s+https?://"
     r"|pip\s+install\s+https?://"
+    # install + immediate code execution (supply chain)
+    r"|npm\s+install\s+.*&&.*node\s+-e\s"
+    # git clone + build/install in one shot (untrusted repo execution)
+    r"|git\s+clone\s+.*&&.*make\s+(install|all)\b"
     # credential exfil via pipe to nc/curl
     r"|cat\s+.*\.(pem|key|id_rsa|id_ed25519|credentials|env)\s*\|"
     r"|cat\s+~/\.ssh/\S+\s*\|"
