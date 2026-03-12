@@ -636,9 +636,11 @@ _EXFIL_EXEC_RE = re.compile(
     r"|/dev/tcp/"
     r"|urllib\.request\.urlopen\("
     r"|requests\.get\(.*\)\.text.*exec\("
-    # download-and-execute chains: wget/curl && ... && ./script
+    # download-and-execute chains: wget/curl && ... && ./script or bash script
     r"|wget\s+.*&&.*\./\w+.*\.sh"
     r"|curl\s+.*-o\s+\S+.*&&.*\./\w+"
+    r"|curl\s+.*-o\s+\S+.*&&.*(?:ba)?sh\s+\S+"
+    r"|wget\s+.*-O\s+\S+.*&&.*(?:ba)?sh\s+\S+"
     # npm/pip install from URL (typosquat / supply chain attack)
     r"|npm\s+install\s+https?://"
     r"|pip\s+install\s+https?://"
