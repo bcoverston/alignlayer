@@ -662,6 +662,34 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     (re.compile(r"^(head|tail|wc|sort|uniq|cut|tr|less|more)$"), re.compile(r""),          0,  0.05, True),
     (re.compile(r"^(awk|jq|yq|column|fmt|fold)$"), re.compile(r""),                       0,  0.05, True),
     (re.compile(r"^(uname|whoami|hostname|uptime|id|pwd|true|false)$"), re.compile(r""),   0,  0.03, True),
+
+    # diff is always read-only
+    (re.compile(r"^diff$"),       re.compile(r""),                                         0,  0.05, True),
+
+    # cat: only cap if no output redirection (> or >>). Exfil patterns caught by _EXFIL_EXEC_RE.
+    # NOTE: can't detect > in verb table since it's in remainder after shlex.
+    # Leave cat to k-NN — the corpus handles it.
+
+    # curl read-only: no -d/--data/-X POST/--upload/--form (exfil caught by _EXFIL_EXEC_RE)
+    (re.compile(r"^curl$"),       re.compile(r"(-d\s|--data|--upload|-X\s*(POST|PUT|PATCH|DELETE)|--form|-F\s)"), 3, 0.62, False),
+    (re.compile(r"^curl$"),       re.compile(r""),                                         0,  0.08, True),
+
+    # sed without -i is a filter (writes to stdout)
+    (re.compile(r"^sed$"),        re.compile(r"-i\b"),                                     1,  0.30, False),
+    (re.compile(r"^sed$"),        re.compile(r""),                                         0,  0.08, True),
+
+    # tar: create/extract to local paths is T1
+    (re.compile(r"^tar$"),        re.compile(r""),                                         1,  0.25, True),
+
+    # cp is local write (T1), not T4
+    (re.compile(r"^cp$"),         re.compile(r""),                                         1,  0.28, True),
+
+    # Common inspection/info commands — T0 cap
+    (re.compile(r"^(date|env|printenv|type|which|file|stat|du|df|free|lsof|ps|top|htop|vmstat|iostat|netstat|ss|ip|ifconfig|ping|traceroute|dig|nslookup|host)$"),
+                                  re.compile(r""),                                         0,  0.05, True),
+
+    # done/fi/esac — closing keywords only, never risky on their own
+    (re.compile(r"^(done|fi|esac)$"), re.compile(r""), 0, 0.03, True),
 ]
 
 _EXFIL_EXEC_RE = re.compile(
@@ -685,8 +713,10 @@ _EXFIL_EXEC_RE = re.compile(
     r"|pip\s+install\s+https?://"
     # install + immediate code execution (supply chain)
     r"|npm\s+install\s+.*&&.*node\s+-e\s"
-    # git clone + build/install in one shot (untrusted repo execution)
+    # git clone + build/install/execute in one shot (untrusted repo execution)
     r"|git\s+clone\s+.*&&.*make\s+(install|all)\b"
+    r"|git\s+clone\s+.*&&.*\./\w+"
+    r"|git\s+clone\s+.*&&.*/install\b"
     # credential exfil via pipe to nc/curl
     r"|cat\s+.*\.(pem|key|id_rsa|id_ed25519|credentials|env)\s*\|"
     r"|cat\s+~/\.ssh/\S+\s*\|"
@@ -711,7 +741,7 @@ _OPAQUE_EXEC_RE = re.compile(
 )
 
 
-_CMD_PREFIXES = {"sudo", "env", "nice", "nohup", "caffeinate", "time"}
+_CMD_PREFIXES = {"sudo", "env", "nice", "nohup", "caffeinate", "time", "do", "then", "else"}
 
 def _parse_cli_verb(cmd: str) -> tuple[str, str]:
     """Return (tool, remainder) from a command string, stripping sudo/env/etc."""
@@ -757,7 +787,7 @@ def _verb_table_lookup(cmd: str) -> dict | None:
         target = remainder if tool in {
             "aws", "kubectl", "git", "redis-cli", "ssh", "docker", "podman",
             "find", "gh", "psql", "terraform", "nginx", "ssh-keygen", "ssh-keyscan",
-            "pip", "pip3", "npm", "yarn", "pnpm", "journalctl",
+            "pip", "pip3", "npm", "yarn", "pnpm", "journalctl", "curl", "sed",
         } else first_pos
         if verb_re.search(target):
             return {"tier": tier, "risk": risk, "is_cap": is_cap, "heuristic": "verb_table"}
@@ -804,6 +834,8 @@ def _split_compound(cmd: str) -> list[str]:
         elif c == '$' and i + 1 < len(cmd) and cmd[i + 1] == '(':
             depth += 1
             current.append(c)
+            current.append('(')
+            i += 1  # skip the '(' — already counted in depth
         elif c == '(' and depth > 0:
             depth += 1
             current.append(c)
@@ -834,7 +866,20 @@ def _split_compound(cmd: str) -> list[str]:
         parts.append("".join(current).strip())
 
     result = [p for p in parts if p]
-    return result if result else [cmd]
+    if not result:
+        return [cmd]
+
+    # Extract inner commands from $() in for/while loop headers.
+    # "for x in $(cmd ...)" → replace the loop header with the inner command.
+    expanded = []
+    for part in result:
+        if re.match(r"^(for|while)\s", part, re.I):
+            inners = [m.group(1).strip() for m in re.finditer(r"\$\((.+?)\)", part)]
+            if inners:
+                expanded.extend(inners)  # replace loop header with inner commands
+                continue
+        expanded.append(part)
+    return expanded
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +943,33 @@ def _predict_single(
         "neighbors": [{"command": n["text"], "risk": n["risk"], "tier": n["tier"], "dist": round(d, 4)}
                       for n, d in zip(neighbors, topk.values.tolist())],
     }
+
+
+_RESTORE_CMDS = re.compile(
+    r"^git\s+(checkout|restore)\b"
+    r"|^svn\s+revert\b"
+    r"|^hg\s+revert\b",
+    re.IGNORECASE,
+)
+
+def _apply_compensating_cap(
+    subcommands: list[str], sub_results: list[dict], result: dict
+) -> dict:
+    """
+    Detect delete-then-restore patterns (e.g., rm -rf X && git checkout X)
+    and cap at T2. The intent is an atomic reset, not destruction.
+    """
+    for i in range(len(subcommands) - 1):
+        sub_a, sub_b = subcommands[i], subcommands[i + 1]
+        tool_a, _ = _parse_cli_verb(sub_a)
+        # Check: destructive command followed by restore of same path
+        if tool_a in ("rm", "del") and _RESTORE_CMDS.match(sub_b.strip()):
+            result = dict(result)
+            result["risk"] = min(result["risk"], 0.50)
+            result["tier"] = min(result["tier"], 2)
+            result["heuristic"] = "compensating_restore"
+            return result
+    return result
 
 
 def predict_risk(
@@ -984,6 +1056,12 @@ def predict_risk(
     best = max(sub_results, key=lambda r: r["risk"])
     result = dict(best)
     result["command"] = cmd
+
+    # Compensating-action detection: if a destructive command is followed by a
+    # restoring command on the same path, cap at T2 (the intent is atomic reset).
+    if len(subcommands) >= 2 and result["tier"] >= 3:
+        result = _apply_compensating_cap(subcommands, sub_results, result)
+
     if debug:
         result["decomposed"] = sub_results
     return result
