@@ -344,6 +344,113 @@ def train(
 
 
 # ---------------------------------------------------------------------------
+# Risk head training (second stage, frozen encoder)
+# ---------------------------------------------------------------------------
+
+def train_risk_head(
+    checkpoint: str = "model/checkpoints/best.pt",
+    corpus_path: str = "data/synthetic/scores-cache.jsonl",
+    epochs: int = 50,
+    batch_size: int = 256,
+    lr: float = 3e-3,
+    val_frac: float = 0.1,
+    device: str | None = None,
+):
+    """Train RiskHead MLP on frozen encoder embeddings. Saves into the same checkpoint."""
+    model, dev = load_model(checkpoint, device)
+    model.eval()
+
+    # Load corpus
+    entries: list[dict] = []
+    with open(corpus_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except Exception:
+                pass
+    print(f"Corpus: {len(entries):,} entries")
+
+    # Embed entire corpus (frozen)
+    print("Embedding corpus...", end=" ", flush=True)
+    is_hybrid = isinstance(model, HybridEncoder)
+    all_embs: list[torch.Tensor] = []
+    with torch.no_grad():
+        for i in range(0, len(entries), batch_size):
+            batch = entries[i : i + batch_size]
+            char_x = torch.stack([encode(e["text"]) for e in batch]).to(dev)
+            if is_hybrid:
+                word_x = torch.stack([tokenize_word(e["text"], model._vocab) for e in batch]).to(dev)
+                all_embs.append(model(char_x, word_x).cpu())
+            else:
+                all_embs.append(model(char_x).cpu())
+    embs = torch.cat(all_embs, dim=0)
+    risks = torch.tensor([e["risk"] for e in entries], dtype=torch.float32)
+    print(f"done. shape={embs.shape}")
+
+    # Train/val split
+    n = len(embs)
+    perm = torch.randperm(n)
+    n_val = max(1, int(n * val_frac))
+    val_idx, train_idx = perm[:n_val], perm[n_val:]
+
+    head = RiskHead(in_dim=embs.shape[1]).to(dev)
+    optimizer = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    best_val = float("inf")
+    best_state = None
+
+    for epoch in range(1, epochs + 1):
+        head.train()
+        # Shuffle training batches
+        shuf = train_idx[torch.randperm(len(train_idx))]
+        train_loss = 0.0
+        n_batches = 0
+        for i in range(0, len(shuf), batch_size):
+            idx = shuf[i : i + batch_size]
+            e_batch = embs[idx].to(dev)
+            r_batch = risks[idx].to(dev)
+            pred = head(e_batch)
+            loss = F.mse_loss(pred, r_batch)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+            n_batches += 1
+        scheduler.step()
+        train_loss /= n_batches
+
+        # Val
+        head.eval()
+        with torch.no_grad():
+            v_emb = embs[val_idx].to(dev)
+            v_risk = risks[val_idx].to(dev)
+            v_pred = head(v_emb)
+            val_loss = F.mse_loss(v_pred, v_risk).item()
+            val_mae = (v_pred - v_risk).abs().mean().item()
+
+        saved = ""
+        if val_loss < best_val:
+            best_val = val_loss
+            best_state = {k: v.cpu().clone() for k, v in head.state_dict().items()}
+            saved = "  ✓ best"
+
+        if epoch % 5 == 0 or epoch == 1 or saved:
+            print(f"Epoch {epoch:3d}/{epochs}  train_mse={train_loss:.5f}  val_mse={val_loss:.5f}  val_mae={val_mae:.4f}  lr={scheduler.get_last_lr()[0]:.2e}{saved}")
+
+    # Save risk head into the encoder checkpoint
+    if best_state is not None:
+        ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        ckpt["risk_head"] = best_state
+        torch.save(ckpt, checkpoint)
+        print(f"\n✓ Risk head saved into {checkpoint} (val_mse={best_val:.5f})")
+    else:
+        print("\nNo improvement — risk head not saved.")
+
+
+# ---------------------------------------------------------------------------
 # Inference helpers
 # ---------------------------------------------------------------------------
 
@@ -369,6 +476,16 @@ def load_model(
         model.load_state_dict(sd)
 
     model.eval()
+
+    # Load risk head if present in checkpoint
+    if "risk_head" in state:
+        in_dim = state["risk_head"]["net.0.weight"].shape[1]
+        hidden = state["risk_head"]["net.0.weight"].shape[0]
+        risk_head = RiskHead(in_dim=in_dim, hidden=hidden).to(dev)
+        risk_head.load_state_dict(state["risk_head"])
+        risk_head.eval()
+        model._risk_head = risk_head  # type: ignore[union-attr]
+
     return model, dev
 
 
@@ -532,6 +649,32 @@ class HybridEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Risk head: MLP that maps embeddings directly to risk scores
+# ---------------------------------------------------------------------------
+
+class RiskHead(nn.Module):
+    """
+    Small MLP that maps 128-d embeddings to scalar risk ∈ [0, 1].
+
+    Replaces k-NN at inference time — no more noisy neighbor votes.
+    Trained as a second stage on frozen encoder embeddings.
+    """
+    def __init__(self, in_dim: int = 128, hidden: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, emb: torch.Tensor) -> torch.Tensor:
+        """emb: (B, 128) → (B,) risk scores in [0, 1]"""
+        return self.net(emb).squeeze(-1)
+
+
+# ---------------------------------------------------------------------------
 # Heuristic pre-processing: dry-run detection + compound decomposition
 # ---------------------------------------------------------------------------
 
@@ -622,7 +765,7 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # ssh with destructive remote commands
     (re.compile(r"^ssh$"),        re.compile(r"(sudo\s+reboot|sudo\s+shutdown|sudo\s+rm\s|rm\s+-rf|sudo\s+systemctl\s+stop|init\s+0)"), 4, 0.88, False),
     # ssh read-only: cap at T0
-    (re.compile(r"^ssh$"),        re.compile(r"(cat\s|tail\s|head\s|less\s|grep\s|ps\s|top\s|uptime|df\s|free\s|uname|hostname|whoami|id\b|env\b|printenv)"), 0, 0.08, True),
+    (re.compile(r"^ssh$"),        re.compile(r"(cat\s|tail\s|head\s|less\s|grep\s|ps\s|top\s|uptime|df\s|free\s|uname|hostname|whoami|id\b|env\b|printenv|systemctl\s+status\b|service\s+\S+\s+status\b|redis-cli\s+(ping|info)\b|pg_isready\b|netstat\b|ss\b|iptables\s+-L)"), 0, 0.08, True),
 
     # docker / podman destructive
     (re.compile(r"^(docker|podman)$"), re.compile(r"^(system\s+prune|volume\s+prune|image\s+prune)\b"), 2, 0.48, False),
@@ -632,8 +775,11 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # terraform state show/list — read-only inspection
     (re.compile(r"^terraform$"),  re.compile(r"^state\s+show\b"),                        0,  0.08, True),
 
-    # psql read-only: metacommands (\dt, \dl, \l, \d+) and SELECT
-    (re.compile(r"^psql$"),       re.compile(r"-c\s+.*\\\\?d[tl+]|SELECT\s", re.I),      0,  0.08, True),
+    # psql: DDL/DML mutations are risky; reads are safe
+    (re.compile(r"^psql$"),       re.compile(r"(DROP\s+(DATABASE|SCHEMA|TABLE)\s)", re.I),  4,  0.82, False),
+    (re.compile(r"^psql$"),       re.compile(r"(CREATE\s+TABLE|ALTER\s+TABLE|GRANT\s|REVOKE\s)", re.I), 3, 0.62, False),
+    (re.compile(r"^psql$"),       re.compile(r"(INSERT\s|UPDATE\s|DELETE\s|TRUNCATE\s|VACUUM\s|ANALYZE\s|REINDEX\s|DROP\s+INDEX)", re.I), 2, 0.45, False),
+    (re.compile(r"^psql$"),       re.compile(r"-c\s+.*\\\\?d[tl+]|SELECT\s|EXPLAIN\s|SHOW\s", re.I), 0, 0.08, True),
 
     # gh (GitHub CLI)
     (re.compile(r"^gh$"),         re.compile(r"^workflow\s+(enable|disable)\b"),           3,  0.62, False),
@@ -684,9 +830,31 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # cp is local write (T1), not T4
     (re.compile(r"^cp$"),         re.compile(r""),                                         1,  0.28, True),
 
+    # helm: template/lint/show/list are read-only; install/upgrade/delete are risky
+    (re.compile(r"^helm$"),       re.compile(r"^(install|upgrade|rollback|delete|uninstall)\b"), 3,  0.62, False),
+    (re.compile(r"^helm$"),       re.compile(r"^(template|lint|show|list|get|status|version|search|repo\s+list|env)\b"), 0, 0.05, True),
+
+    # wget: downloads to local file — T1 cap (exfil chains caught by _EXFIL_EXEC_RE)
+    (re.compile(r"^wget$"),       re.compile(r""),                                         1,  0.28, True),
+
+    # base64: encode/decode is a pure filter (stdout) — T0 cap
+    (re.compile(r"^base64$"),     re.compile(r""),                                         0,  0.05, True),
+
     # Common inspection/info commands — T0 cap
     (re.compile(r"^(date|env|printenv|type|which|file|stat|du|df|free|lsof|ps|top|htop|vmstat|iostat|netstat|ss|ip|ifconfig|ping|traceroute|dig|nslookup|host)$"),
                                   re.compile(r""),                                         0,  0.05, True),
+
+    # Scanning/security audit tools — T0 cap (read-only analysis)
+    (re.compile(r"^openssl$"),    re.compile(r""),                                         0,  0.05, True),
+    (re.compile(r"^(nmap|nikto|gobuster|trivy|bandit|safety)$"), re.compile(r""),          0,  0.08, True),
+
+    # systemctl: status/is-active are reads; start/stop/restart/enable/disable are mutations
+    (re.compile(r"^systemctl$"),  re.compile(r"^(restart|stop|start|enable|disable|mask|unmask)\b"), 3, 0.62, False),
+    (re.compile(r"^systemctl$"),  re.compile(r""),                                         0,  0.05, True),
+
+    # brew: list/search/info are reads; install/upgrade/uninstall are local writes
+    (re.compile(r"^brew$"),       re.compile(r"^(install|upgrade|uninstall|remove|tap|untap)\b"), 1, 0.28, True),
+    (re.compile(r"^brew$"),       re.compile(r""),                                         0,  0.05, True),
 
     # done/fi/esac — closing keywords only, never risky on their own
     (re.compile(r"^(done|fi|esac)$"), re.compile(r""), 0, 0.03, True),
@@ -769,6 +937,11 @@ def _parse_cli_verb(cmd: str) -> tuple[str, str]:
             break
     tool = parts[0].lower()
     remainder = " ".join(parts[1:]).lower()
+    # Unwrap `python3 -m <module>` → tool=module, remainder=rest
+    if tool in ("python3", "python", "python3.10", "python3.11", "python3.12", "python3.13", "python3.14") \
+       and len(parts) >= 3 and parts[1] == "-m":
+        tool = parts[2].lower()
+        remainder = " ".join(parts[3:]).lower()
     return tool, remainder
 
 
@@ -788,6 +961,7 @@ def _verb_table_lookup(cmd: str) -> dict | None:
             "aws", "kubectl", "git", "redis-cli", "ssh", "docker", "podman",
             "find", "gh", "psql", "terraform", "nginx", "ssh-keygen", "ssh-keyscan",
             "pip", "pip3", "npm", "yarn", "pnpm", "journalctl", "curl", "sed",
+            "helm", "systemctl", "brew",
         } else first_pos
         if verb_re.search(target):
             return {"tier": tier, "risk": risk, "is_cap": is_cap, "heuristic": "verb_table"}
@@ -922,13 +1096,28 @@ def _predict_single(
             "neighbors": [],
         }
     emb = embed_command(cmd, model, dev)
+
+    # Risk head path: direct MLP prediction (no corpus lookup needed)
+    risk_head: RiskHead | None = getattr(model, "_risk_head", None)
+    if risk_head is not None:
+        with torch.no_grad():
+            pred_risk = risk_head(emb.unsqueeze(0).to(dev)).item()
+        tier = _risk_to_tier(pred_risk)
+        return {
+            "command": cmd,
+            "risk": round(pred_risk, 4),
+            "blast_radius": 0.0,
+            "tier": tier,
+            "source": "risk_head",
+            "neighbors": [],
+        }
+
+    # Fallback: k-NN with inverse-distance weighting
     dists = torch.norm(ref_embs - emb.unsqueeze(0), dim=1)
     topk = dists.topk(k, largest=False)
     neighbors = [ref_entries[i] for i in topk.indices.tolist()]
     top_dists = topk.values.tolist()
 
-    # Inverse-distance weighting: closer neighbors get more influence.
-    # Clamp minimum distance to avoid division by zero for exact matches.
     eps = 1e-6
     weights = [1.0 / max(d, eps) for d in top_dists]
     w_sum = sum(weights)
@@ -940,6 +1129,7 @@ def _predict_single(
         "risk": round(avg_risk, 4),
         "blast_radius": round(avg_blast, 4),
         "tier": tier,
+        "source": "knn",
         "neighbors": [{"command": n["text"], "risk": n["risk"], "tier": n["tier"], "dist": round(d, 4)}
                       for n, d in zip(neighbors, topk.values.tolist())],
     }
@@ -1125,6 +1315,14 @@ def main():
     em.add_argument("--cmd", dest="embed_cmd", required=True)
     em.add_argument("--scores-cache", default="data/synthetic/scores-cache.jsonl")
 
+    rh = sub.add_parser("train-risk-head")
+    rh.add_argument("--checkpoint", default="model/checkpoints/best.pt")
+    rh.add_argument("--corpus",     default="data/synthetic/scores-cache.jsonl")
+    rh.add_argument("--epochs",     type=int,   default=50)
+    rh.add_argument("--batch-size", type=int,   default=256)
+    rh.add_argument("--lr",         type=float, default=3e-3)
+    rh.add_argument("--device",     default=None)
+
     args = p.parse_args()
 
     if args.cmd == "train":
@@ -1147,6 +1345,16 @@ def main():
         ref_embs, ref_entries = build_reference_index(args.scores_cache, model, dev)
         result = predict_risk(args.embed_cmd, model, dev, ref_embs, ref_entries)
         print(json.dumps(result, indent=2))
+
+    elif args.cmd == "train-risk-head":
+        train_risk_head(
+            checkpoint=args.checkpoint,
+            corpus_path=args.corpus,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            device=args.device,
+        )
 
 
 if __name__ == "__main__":
