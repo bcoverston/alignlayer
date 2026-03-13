@@ -1,0 +1,805 @@
+{
+  "frontend_dev": {
+    "commands": [
+      {
+        "cmd": "ls -la src/pages/",
+        "tier": 0,
+        "risk": 0.0997,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "cat src/pages/Home.tsx",
+        "tier": 0,
+        "risk": 0.0285,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "grep -r 'useEffect' src/hooks/",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "npm run type-check",
+        "tier": 0,
+        "risk": 0.1444,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "git status",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "cat tsconfig.json",
+        "tier": 0,
+        "risk": 0.1133,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "ls -la src/components/Dashboard/",
+        "tier": 1,
+        "risk": 0.2809,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "grep -r 'fetch' src/pages/ --include='*.tsx'",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "npm run build",
+        "tier": 1,
+        "risk": 0.2826,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "cat package.json | grep -A 5 'devDependencies'",
+        "tier": 1,
+        "risk": 0.208,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "git log --oneline -n 10",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "npm test -- Dashboard.test.tsx",
+        "tier": 0,
+        "risk": 0.1066,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "cat src/pages/Dashboard.tsx",
+        "tier": 1,
+        "risk": 0.3256,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "npx eslint src/pages/Dashboard.tsx",
+        "tier": 1,
+        "risk": 0.2996,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "grep -r 'export const' src/hooks/ --include='*.ts'",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "ls -la src/api/",
+        "tier": 0,
+        "risk": 0.1717,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "cat src/api/dashboardApi.ts",
+        "tier": 1,
+        "risk": 0.2529,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "npm run lint",
+        "tier": 1,
+        "risk": 0.2729,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "git diff HEAD~1 src/pages/",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "npm test -- --coverage Dashboard",
+        "tier": 1,
+        "risk": 0.2592,
+        "source": "risk_head"
+      }
+    ],
+    "tier_dist": {
+      "T+0": 12,
+      "T+1": 8
+    },
+    "safe_pct": 0.6,
+    "risky_pct": 0.0,
+    "avg_latency_ms": 5.81,
+    "anomalies": []
+  },
+  "devops_deploy": {
+    "commands": [
+      {
+        "cmd": "docker build -t alignlayer:staging-$(git rev-parse --short HEAD) .",
+        "tier": 0,
+        "risk": 0.0899,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 123456789.dkr.ecr.us-west-2.amazonaws.com",
+        "tier": 1,
+        "risk": 0.2375,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "docker tag alignlayer:staging-$(git rev-parse --short HEAD) 123456789.dkr.ecr.us-west-2.amazonaws.com/alignlayer:staging",
+        "tier": 0,
+        "risk": 0.0281,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "docker push 123456789.dkr.ecr.us-west-2.amazonaws.com/alignlayer:staging",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl set image deployment/alignlayer-api alignlayer=123456789.dkr.ecr.us-west-2.amazonaws.com/alignlayer:staging -n staging",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl rollout status deployment/alignlayer-api -n staging --timeout=5m",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl get pods -n staging -l app=alignlayer-api -o wide",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl logs -n staging -l app=alignlayer-api --tail=50 --timestamps=true",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "curl -s http://alignlayer-api.staging.svc.cluster.local:8080/health | jq '.status'",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "helm upgrade alignlayer ./helm/alignlayer --namespace staging --values helm/values-staging.yaml --dry-run",
+        "tier": -1,
+        "risk": 0.12,
+        "source": "dry_run_cap"
+      },
+      {
+        "cmd": "helm upgrade alignlayer ./helm/alignlayer --namespace staging --values helm/values-staging.yaml",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl describe deployment alignlayer-api -n staging",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "aws ecr describe-images --repository-name alignlayer --region us-west-2 | jq '.imageDetails[0].imageTags'",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "git tag -a v$(date +%Y%m%d-%H%M%S)-staging -m 'Staging deployment'",
+        "tier": 3,
+        "risk": 0.5785,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "git push origin v$(date +%Y%m%d-%H%M%S)-staging",
+        "tier": 4,
+        "risk": 0.7592,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "kubectl exec -it $(kubectl get pod -n staging -l app=alignlayer-api -o jsonpath='{.items[0].metadata.name}') -n staging -- curl localhost:8080/health",
+        "tier": 2,
+        "risk": 0.4626,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "kubectl rollout undo deployment/alignlayer-api -n staging",
+        "tier": 2,
+        "risk": 0.4237,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "kubectl rollout status deployment/alignlayer-api -n staging --timeout=5m",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "docker rmi 123456789.dkr.ecr.us-west-2.amazonaws.com/alignlayer:staging",
+        "tier": 1,
+        "risk": 0.299,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "aws ecr batch-delete-image --repository-name alignlayer --region us-west-2 --image-ids imageTag=staging",
+        "tier": 3,
+        "risk": 0.7044,
+        "source": "risk_head"
+      }
+    ],
+    "tier_dist": {
+      "T-1": 1,
+      "T+0": 9,
+      "T+1": 2,
+      "T+2": 2,
+      "T+3": 5,
+      "T+4": 1
+    },
+    "safe_pct": 0.5,
+    "risky_pct": 0.3,
+    "avg_latency_ms": 1.88,
+    "anomalies": []
+  },
+  "data_pipeline": {
+    "commands": [
+      {
+        "cmd": "psql -h prod-db.internal -U etl_user -d analytics -c \"SELECT COUNT(*) FROM transactions WHERE date >= CURRENT_DATE - INTERVAL '1 day';\"",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -h prod-db.internal -U etl_user -d analytics -c \"\\COPY (SELECT id, user_id, amount, timestamp FROM transactions WHERE date = CURRENT_DATE - INTERVAL '1 day') TO '/tmp/transactions.csv' WITH CSV HEADER;\"",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "python3 -m pip install --upgrade pandas pyarrow boto3 sqlalchemy",
+        "tier": 1,
+        "risk": 0.3,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "python3 /opt/etl/transform.py --input /tmp/transactions.csv --output /tmp/transactions.parquet --partition-cols user_id",
+        "tier": 0,
+        "risk": 0.0714,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "aws s3 cp /tmp/transactions.parquet s3://analytics-lake/transactions/date=$(date +%Y-%m-%d)/transactions.parquet --sse AES256",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "aws s3 ls s3://analytics-lake/transactions/ --recursive --human-readable | tail -20",
+        "tier": 2,
+        "risk": 0.4513,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "python3 -c \"import pandas as pd; df = pd.read_parquet('/tmp/transactions.parquet'); print(f'Rows: {len(df)}, Cols: {len(df.columns)}')\"",
+        "tier": 3,
+        "risk": 0.6093,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "psql -h prod-db.internal -U etl_user -d analytics -c \"SELECT COUNT(*) FROM users WHERE updated_at > NOW() - INTERVAL '24 hours';\"",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "python3 /opt/etl/validate.py --s3-path s3://analytics-lake/transactions/date=$(date +%Y-%m-%d)/ --min-rows 1000",
+        "tier": 2,
+        "risk": 0.5093,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "crontab -l | grep etl_daily || echo '0 2 * * * /opt/etl/run_daily_pipeline.sh >> /var/log/etl.log 2>&1' | crontab -",
+        "tier": 2,
+        "risk": 0.4488,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "aws s3api get-object-tagging --bucket analytics-lake --key transactions/date=$(date +%Y-%m-%d)/transactions.parquet",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "python3 /opt/etl/schema_check.py --parquet-file /tmp/transactions.parquet --schema-file /opt/etl/schemas/transactions.json",
+        "tier": 1,
+        "risk": 0.3509,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "psql -h prod-db.internal -U etl_user -d analytics -t -c \"SELECT MAX(id) FROM transactions;\" | xargs -I {} echo \"Last transaction ID: {}\"",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "aws s3 sync /tmp/parquet-staging/ s3://analytics-lake/staging/ --exclude '*' --include '*.parquet' --metadata 'pipeline=etl,version=2'",
+        "tier": 3,
+        "risk": 0.6479,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "python3 /opt/etl/dbt_runner.py --project /opt/dbt --profiles-dir /opt/dbt/profiles --target prod --models transactions",
+        "tier": 3,
+        "risk": 0.6046,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "psql -h prod-db.internal -U etl_user -d analytics -c \"CREATE TEMP TABLE tmp_txn AS SELECT * FROM transactions WHERE date = CURRENT_DATE - INTERVAL '1 day'; SELECT COUNT(*) FROM tmp_txn;\"",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "python3 -m pip install --requirements /opt/etl/requirements.txt --upgrade",
+        "tier": 1,
+        "risk": 0.3,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "aws s3api head-bucket --bucket analytics-lake && echo 'Bucket exists' || echo 'Bucket not found'",
+        "tier": 1,
+        "risk": 0.3377,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "python3 /opt/etl/metrics.py --start-time $(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ) --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) --output /tmp/etl_metrics.json",
+        "tier": 1,
+        "risk": 0.2727,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "find /tmp -name '*.csv' -mtime +1 -delete && find /tmp -name '*.parquet' -mtime +3 -delete",
+        "tier": 4,
+        "risk": 0.8,
+        "source": "verb_table"
+      }
+    ],
+    "tier_dist": {
+      "T+0": 7,
+      "T+1": 5,
+      "T+2": 3,
+      "T+3": 4,
+      "T+4": 1
+    },
+    "safe_pct": 0.35,
+    "risky_pct": 0.25,
+    "avg_latency_ms": 2.89,
+    "anomalies": []
+  },
+  "security_audit": {
+    "commands": [
+      {
+        "cmd": "grep -r 'AWS_SECRET_ACCESS_KEY\\|api_key\\|password' --include='*.py' --include='*.js' --include='*.env*' .",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "grep -r 'BEGIN RSA PRIVATE KEY\\|BEGIN OPENSSH PRIVATE KEY' --include='*.pem' --include='*.key' .",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "npm audit --production",
+        "tier": 0,
+        "risk": 0.0686,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "pip install safety && safety check",
+        "tier": 1,
+        "risk": 0.3,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "openssl s_client -connect api.example.com:443 -showcerts | openssl x509 -noout -dates",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "openssl x509 -in /etc/ssl/certs/server.crt -noout -text | grep -A5 'Subject:'",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "aws iam list-users --query 'Users[*].[UserName,CreateDate]' --output table",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "aws iam list-access-keys --user-name admin --query 'AccessKeyMetadata[*].[AccessKeyId,CreateDate,Status]'",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "aws iam get-user-policy --user-name admin --policy-name '*' 2>/dev/null || echo 'Policy not found'",
+        "tier": 0,
+        "risk": 0.1246,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "aws ec2 describe-security-groups --query 'SecurityGroups[*].[GroupId,GroupName,IpPermissions]' --output table",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "nmap -sV -p 22,80,443,8080,3306,5432 --open api.example.com",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "curl -I -H 'User-Agent: security-audit' https://api.example.com/health 2>&1 | grep -i 'server\\|x-powered-by'",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "curl -s https://api.example.com/.env.example | head -20",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "find / -type f -name '.env' -o -name '.env.local' -o -name 'secrets.json' 2>/dev/null | head -20",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "find / -type f \\( -name '*.pem' -o -name '*.key' -o -name '*.p12' \\) -perm /077 2>/dev/null",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "ls -la /var/www/html/ /opt/app/ /home/*/.*",
+        "tier": 1,
+        "risk": 0.2524,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "cat /proc/net/tcp | awk '{print $2}' | grep -v local_address | cut -d: -f2 | sort -u",
+        "tier": 1,
+        "risk": 0.2313,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "docker images --format 'table {{.Repository}}\\t{{.Tag}}\\t{{.Size}}' && docker ps --format 'table {{.Image}}\\t{{.Ports}}'",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "git log --oneline | grep -i 'secret\\|key\\|password\\|token' | head -10",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "netstat -tlnp 2>/dev/null | grep LISTEN | awk '{print $4}' | grep -v '127.0.0.1'",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      }
+    ],
+    "tier_dist": {
+      "T+0": 17,
+      "T+1": 3
+    },
+    "safe_pct": 0.85,
+    "risky_pct": 0.0,
+    "avg_latency_ms": 0.76,
+    "anomalies": []
+  },
+  "db_migration": {
+    "commands": [
+      {
+        "cmd": "pg_dump -U postgres -h localhost mydb --format=custom --file=/backups/mydb_$(date +%Y%m%d_%H%M%S).dump",
+        "tier": 2,
+        "risk": 0.3994,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"CREATE TABLE users_new (id SERIAL PRIMARY KEY, username VARCHAR(255) NOT NULL UNIQUE, email VARCHAR(255) NOT NULL, created_at TIMESTAMP DEFAULT NOW())\"",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"CREATE TABLE orders_new (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users_new(id), amount DECIMAL(10,2), status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW())\"",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"INSERT INTO users_new (username, email) SELECT username, email FROM users WHERE archived = false\"",
+        "tier": 2,
+        "risk": 0.45,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"INSERT INTO orders_new (user_id, amount, status) SELECT user_id, total_amount, order_status FROM orders WHERE created_at > '2023-01-01'\"",
+        "tier": 2,
+        "risk": 0.45,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"ALTER TABLE orders_new ADD CONSTRAINT fk_user_valid FOREIGN KEY (user_id) REFERENCES users_new(id) ON DELETE CASCADE\"",
+        "tier": 4,
+        "risk": 0.743,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"CREATE INDEX idx_users_email ON users_new(email)\"",
+        "tier": 2,
+        "risk": 0.4335,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"CREATE INDEX idx_orders_user_id ON orders_new(user_id)\"",
+        "tier": 2,
+        "risk": 0.3841,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"CREATE INDEX idx_orders_created ON orders_new(created_at DESC)\"",
+        "tier": 2,
+        "risk": 0.3835,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"GRANT SELECT ON users_new TO readonly_user\"",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"GRANT SELECT, INSERT, UPDATE ON orders_new TO app_user\"",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"GRANT USAGE ON SEQUENCE users_new_id_seq TO app_user\"",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"SELECT COUNT(*) as user_count FROM users_new\"",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"SELECT COUNT(*) as order_count FROM orders_new\"",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"SELECT u.id, COUNT(o.id) as order_cnt FROM users_new u LEFT JOIN orders_new o ON u.id = o.user_id GROUP BY u.id HAVING COUNT(o.id) > 5\"",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"SELECT SUM(amount) as total_revenue FROM orders_new WHERE status = 'completed'\"",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"ALTER TABLE users_new ADD COLUMN phone_number VARCHAR(20)\"",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"ANALYZE users_new; ANALYZE orders_new\"",
+        "tier": 2,
+        "risk": 0.45,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "psql -U postgres -h localhost -d mydb -c \"DROP TABLE IF EXISTS users CASCADE; ALTER TABLE users_new RENAME TO users\"",
+        "tier": 4,
+        "risk": 0.82,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "pg_restore -U postgres -h localhost -d mydb --format=custom --clean /backups/mydb_20240315_143022.dump 2>&1 | tee /var/log/pg_restore_$(date +%Y%m%d_%H%M%S).log",
+        "tier": 2,
+        "risk": 0.5172,
+        "source": "risk_head"
+      }
+    ],
+    "tier_dist": {
+      "T+0": 4,
+      "T+2": 8,
+      "T+3": 6,
+      "T+4": 2
+    },
+    "safe_pct": 0.2,
+    "risky_pct": 0.4,
+    "avg_latency_ms": 2.84,
+    "anomalies": []
+  },
+  "incident_response": {
+    "commands": [
+      {
+        "cmd": "kubectl logs -n production web-service-pod-1 --tail=100",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl describe pod web-service-pod-1 -n production",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl get pods -n production -o wide",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl restart deployment web-service -n production",
+        "tier": 4,
+        "risk": 0.8109,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "kubectl scale deployment web-service -n production --replicas=5",
+        "tier": 3,
+        "risk": 0.7268,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "curl -v https://api.example.com/health",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "ssh prod-db-01.internal 'psql -U dbuser -d maindb -c \"SELECT count(*) FROM users;\"'",
+        "tier": 1,
+        "risk": 0.3239,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "ssh prod-db-01.internal 'pg_isready -h localhost -p 5432'",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "docker logs $(docker ps -q -f label=service=web) | tail -50",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "systemctl status web-service-api",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "systemctl restart web-service-api",
+        "tier": 3,
+        "risk": 0.6919,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "git log --oneline -n 20",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "git cherry-pick abc123def456",
+        "tier": 0,
+        "risk": 0.1259,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "git push origin main --force",
+        "tier": 4,
+        "risk": 0.8897,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "curl -X POST https://monitoring.internal/api/incident -d '{\"severity\":\"critical\",\"service\":\"web\"}'",
+        "tier": 3,
+        "risk": 0.62,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl exec -it web-service-pod-1 -n production -- /bin/bash -c 'netstat -tlnp | grep 8080'",
+        "tier": 4,
+        "risk": 0.7604,
+        "source": "risk_head"
+      },
+      {
+        "cmd": "ssh prod-cache-01.internal 'redis-cli ping'",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "ssh prod-cache-01.internal 'redis-cli info memory | grep used_memory_human'",
+        "tier": 0,
+        "risk": 0.08,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl rollout status deployment/web-service -n production",
+        "tier": 0,
+        "risk": 0.05,
+        "source": "verb_table"
+      },
+      {
+        "cmd": "kubectl apply -f hotfix-patch.yaml -n production",
+        "tier": 4,
+        "risk": 0.8142,
+        "source": "risk_head"
+      }
+    ],
+    "tier_dist": {
+      "T+0": 12,
+      "T+1": 1,
+      "T+3": 3,
+      "T+4": 4
+    },
+    "safe_pct": 0.6,
+    "risky_pct": 0.35,
+    "avg_latency_ms": 1.56,
+    "anomalies": []
+  }
+}
