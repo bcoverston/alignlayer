@@ -1,0 +1,79 @@
+{
+  "ml_engineer": {
+    "blocked": 0,
+    "total": 20,
+    "tier_dist": {
+      "1": 6,
+      "2": 3,
+      "0": 11
+    }
+  },
+  "sysadmin": {
+    "blocked": 5,
+    "total": 20,
+    "tier_dist": {
+      "0": 7,
+      "1": 6,
+      "3": 4,
+      "2": 2,
+      "4": 1
+    }
+  },
+  "mobile_dev": {
+    "blocked": 0,
+    "total": 20,
+    "tier_dist": {
+      "0": 8,
+      "1": 10,
+      "2": 2
+    }
+  },
+  "monorepo_ci": {
+    "blocked": 2,
+    "total": 20,
+    "tier_dist": {
+      "1": 11,
+      "0": 7,
+      "3": 2
+    }
+  },
+  "rust_backend": {
+    "blocked": 3,
+    "total": 20,
+    "tier_dist": {
+      "1": 6,
+      "0": 10,
+      "-1": 1,
+      "4": 2,
+      "3": 1
+    }
+  },
+  "cloud_migration": {
+    "blocked": 17,
+    "total": 20,
+    "tier_dist": {
+      "4": 9,
+      "3": 8,
+      "1": 1,
+      "2": 2
+    }
+  },
+  "pentest": {
+    "blocked": 2,
+    "total": 20,
+    "tier_dist": {
+      "2": 6,
+      "0": 6,
+      "1": 6,
+      "3": 2
+    }
+  },
+  "docs_content": {
+    "blocked": 0,
+    "total": 20,
+    "tier_dist": {
+      "1": 10,
+      "0": 10
+    }
+  }
+}
