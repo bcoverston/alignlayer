@@ -49,6 +49,8 @@ CORPUS     = os.environ.get("ALIGNLAYER_CORPUS",     "data/synthetic/scores-cach
 K          = int(os.environ.get("ALIGNLAYER_K",         "5"))
 THRESHOLD  = float(os.environ.get("ALIGNLAYER_THRESHOLD", "0.55"))
 TRACES_DIR = Path(os.environ.get("ALIGNLAYER_TRACES_DIR", "data/traces"))
+# Hook traces (written by the TS hook, separate from server traces)
+HOOK_TRACES_DIR = Path.home() / ".alignlayer" / "traces"
 
 logger = logging.getLogger("alignlayer.serve")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -392,6 +394,120 @@ def trace_distributions() -> dict:
         "heuristic_counts": dict(sorted(heuristics.items(), key=lambda x: -x[1])),
         "decisions": decisions,
         "hourly_volume": dict(sorted(hourly.items())),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — threshold simulator
+# ---------------------------------------------------------------------------
+
+@app.get("/traces/threshold-sim")
+def threshold_sim() -> dict:
+    """Replay all scored commands at multiple thresholds."""
+    thresholds = [0.35, 0.45, 0.55, 0.65, 0.75]
+    risks: list[float] = []
+
+    for f in sorted(TRACES_DIR.glob("claude-code-*.jsonl")):
+        for line in open(f):
+            try:
+                e = json.loads(line)
+                risk = e.get("ml_risk")
+                if risk is not None:
+                    risks.append(risk)
+            except Exception:
+                pass
+
+    if not risks:
+        return {"total": 0, "thresholds": {}}
+
+    result = {}
+    for t in thresholds:
+        interrupts = sum(1 for r in risks if r >= t)
+        allows = len(risks) - interrupts
+        result[str(t)] = {
+            "allow": allows,
+            "interrupt": interrupts,
+            "interrupt_rate": round(interrupts / len(risks), 4),
+        }
+
+    return {"total": len(risks), "thresholds": result}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — human outcomes (from hook traces)
+# ---------------------------------------------------------------------------
+
+def _load_hook_traces() -> list[dict]:
+    """Load before_tool_call events from the hook trace directory."""
+    entries = []
+    if not HOOK_TRACES_DIR.exists():
+        return entries
+    for f in sorted(HOOK_TRACES_DIR.glob("alignlayer-*.jsonl")):
+        for line in f.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except Exception:
+                pass
+    return entries
+
+
+@app.get("/traces/outcomes")
+def human_outcomes() -> dict:
+    """Aggregate human approve/deny decisions from hook traces."""
+    entries = _load_hook_traces()
+
+    total_asks = 0
+    approved = 0
+    # Build set of asked tool_use_ids from before_tool_call with decision=interrupt
+    asked_ids: set[str] = set()
+    approved_cmds: list[dict] = []
+    denied_cmds: list[dict] = []
+
+    # First pass: identify asked tool calls
+    for e in entries:
+        if e.get("event") == "before_tool_call" and e.get("decision") == "interrupt":
+            asked_ids.add(e.get("turn_id", ""))
+            total_asks += 1
+
+    # Second pass: check which ones got PostToolUse (= approved)
+    approved_ids: set[str] = set()
+    for e in entries:
+        if e.get("event") == "after_tool_call" and e.get("turn_id", "") in asked_ids:
+            approved_ids.add(e["turn_id"])
+            if e.get("human_outcome") == "approved":
+                approved += 1
+
+    # Collect details for approved/denied
+    for e in entries:
+        if e.get("event") != "before_tool_call" or e.get("turn_id", "") not in asked_ids:
+            continue
+        cmd = ""
+        args = e.get("args", {})
+        if isinstance(args, dict):
+            cmd = args.get("command", args.get("cmd", ""))
+        info = {
+            "cmd": str(cmd)[:200],
+            "risk": e.get("risk_score"),
+            "tool": e.get("tool", ""),
+            "timestamp": e.get("timestamp", ""),
+        }
+        if e["turn_id"] in approved_ids:
+            approved_cmds.append(info)
+        else:
+            denied_cmds.append(info)
+
+    denied = total_asks - len(approved_ids)
+
+    return {
+        "total_hook_events": len(entries),
+        "total_asks": total_asks,
+        "approved": len(approved_ids),
+        "denied": denied,
+        "approval_rate": round(len(approved_ids) / total_asks, 4) if total_asks > 0 else None,
+        "recent_approved": approved_cmds[-10:],
+        "recent_denied": denied_cmds[-10:],
     }
 
 

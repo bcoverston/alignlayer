@@ -59,6 +59,18 @@
   .wide { grid-column: 1 / -1; }
   .two-col { grid-column: span 2; }
 
+  .threshold-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+  .threshold-table th, .threshold-table td { padding: 4px 8px; text-align: right; border-bottom: 1px solid var(--border); }
+  .threshold-table th { color: var(--text-dim); font-weight: normal; text-align: right; }
+  .threshold-table .active { color: var(--accent); font-weight: bold; }
+
+  .outcome-stat { display: flex; gap: 16px; margin-top: 8px; }
+  .outcome-stat .num { font-size: 20px; font-weight: bold; }
+  .outcome-stat .label { font-size: 11px; color: var(--text-dim); }
+  .outcome-approved .num { color: var(--green); }
+  .outcome-denied .num { color: var(--red); }
+  .outcome-pending .num { color: var(--yellow); }
+
   .tools-grid { display: flex; flex-wrap: wrap; gap: 4px; }
   .tool-chip { padding: 2px 8px; border-radius: 3px; background: var(--bg); font-size: 11px; border: 1px solid var(--border); }
   .tool-chip .count { color: var(--accent); margin-left: 4px; }
@@ -102,6 +114,23 @@
       <div style="margin-top:8px" id="decision-labels"></div>
       <h2 style="margin-top:16px">Tools</h2>
       <div class="tools-grid" id="tool-chips"></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card two-col">
+      <h2>Threshold Simulator</h2>
+      <p style="font-size:11px;color:var(--text-dim);margin-bottom:8px">What-if: interrupt rate at different thresholds</p>
+      <table class="threshold-table" id="threshold-table">
+        <tr><td colspan="4" style="color:var(--text-dim)">Loading...</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Human Outcomes (Phase 1)</h2>
+      <div class="outcome-stat" id="outcome-stats">
+        <span style="color:var(--text-dim)">Loading...</span>
+      </div>
+      <div id="outcome-detail" style="margin-top:8px;font-size:11px"></div>
     </div>
   </div>
 
@@ -244,8 +273,62 @@ async function updateTail() {
   } catch (e) {}
 }
 
+async function updateThresholdSim() {
+  try {
+    const data = await fetchJSON('/traces/threshold-sim');
+    if (!data.total) return;
+    const table = document.getElementById('threshold-table');
+    let html = '<tr><th>Threshold</th><th>Allow</th><th>Interrupt</th><th>Rate</th></tr>';
+    for (const [t, v] of Object.entries(data.thresholds)) {
+      const isActive = parseFloat(t) === 0.55;
+      const cls = isActive ? 'active' : '';
+      const marker = isActive ? ' *' : '';
+      html += `<tr class="${cls}">
+        <td>${t}${marker}</td>
+        <td>${v.allow}</td>
+        <td>${v.interrupt}</td>
+        <td>${(v.interrupt_rate * 100).toFixed(1)}%</td>
+      </tr>`;
+    }
+    html += `<tr><td colspan="4" style="color:var(--text-dim);font-size:10px;padding-top:8px">* = current threshold | ${data.total} scored commands</td></tr>`;
+    table.innerHTML = html;
+  } catch (e) {}
+}
+
+async function updateOutcomes() {
+  try {
+    const data = await fetchJSON('/traces/outcomes');
+    const el = document.getElementById('outcome-stats');
+    const detail = document.getElementById('outcome-detail');
+
+    if (data.total_asks === 0) {
+      el.innerHTML = '<span style="color:var(--text-dim)">No interrupts yet (Phase 1 active)</span>';
+      detail.innerHTML = `<span style="color:var(--text-dim)">${data.total_hook_events} hook events recorded</span>`;
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="outcome-approved"><div class="num">${data.approved}</div><div class="label">approved</div></div>
+      <div class="outcome-denied"><div class="num">${data.denied}</div><div class="label">denied</div></div>
+      <div class="outcome-pending"><div class="num">${data.total_asks}</div><div class="label">total asks</div></div>
+    `;
+
+    let detailHtml = '';
+    if (data.approval_rate !== null) {
+      detailHtml += `<span style="color:var(--text-dim)">Approval rate: ${(data.approval_rate * 100).toFixed(0)}%</span>`;
+    }
+    if (data.recent_denied.length > 0) {
+      detailHtml += '<div style="margin-top:6px;color:var(--red)">Recent denied:</div>';
+      for (const d of data.recent_denied.slice(-3)) {
+        detailHtml += `<div style="color:var(--text-dim);padding-left:8px">${d.cmd.slice(0, 60)}</div>`;
+      }
+    }
+    detail.innerHTML = detailHtml;
+  } catch (e) {}
+}
+
 async function poll() {
-  await Promise.all([updateStats(), updateTail()]);
+  await Promise.all([updateStats(), updateTail(), updateThresholdSim(), updateOutcomes()]);
   setTimeout(poll, POLL_MS);
 }
 
