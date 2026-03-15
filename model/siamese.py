@@ -1199,7 +1199,15 @@ def predict_risk(
     # Check exfil patterns against the full unsplit command first — pipe-based
     # patterns like `curl ... | bash` are destroyed by compound splitting.
     # Loopback URLs (localhost, 127.0.0.1, etc.) are exempted — local dev traffic.
-    if _EXFIL_EXEC_RE.search(cmd) and not _LOOPBACK_RE.search(cmd):
+    # Skip exfil check on git commit commands — commit messages are data, not
+    # execution, and heredoc messages often contain words like "curl", "exfil",
+    # "bash" that trigger false positives.
+    _cmd_stripped = cmd.lower().lstrip()
+    _is_commit = (
+        _cmd_stripped.startswith("git commit")
+        or (_cmd_stripped.startswith("git add") and "commit" in _cmd_stripped)
+    )
+    if not _is_commit and _EXFIL_EXEC_RE.search(cmd) and not _LOOPBACK_RE.search(cmd):
         return {
             "command": cmd, "risk": 0.95, "tier": -2,
             "heuristic": "exfil_exec", "neighbors": [], "blast_radius": 0.0,
