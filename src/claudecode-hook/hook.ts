@@ -12,6 +12,7 @@
  */
 
 import fs from "fs";
+import http from "http";
 import path from "path";
 
 // ---------------------------------------------------------------------------
@@ -191,6 +192,49 @@ function getAndIncrementToolIndex(sessionId: string): number {
 }
 
 // ---------------------------------------------------------------------------
+// ML model scoring via HTTP (localhost scoring server)
+// ---------------------------------------------------------------------------
+
+const ML_SERVER_URL = process.env["ALIGNLAYER_URL"] ?? "http://localhost:8000";
+
+interface MLScoreResult {
+  risk: number;
+  tier: number;
+  decision: "allow" | "interrupt";
+}
+
+function mlScore(command: string): Promise<MLScoreResult | null> {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ command });
+    const url = new URL(`${ML_SERVER_URL}/score`);
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 8000,
+        path: url.pathname,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        timeout: 2000,
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk: Buffer) => { data += chunk; });
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(data) as MLScoreResult;
+            resolve(parsed);
+          } catch { resolve(null); }
+        });
+      }
+    );
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -201,39 +245,67 @@ const { session_id, hook_event_name, tool_name, tool_input, tool_use_id } =
 
 if (hook_event_name === "PreToolUse") {
   const toolIdx = getAndIncrementToolIndex(session_id);
+
+  // TS heuristic (fallback / non-Bash tools)
   const br = blastRadius(tool_name, tool_input);
   const pc = planConfidence(toolIdx);
-  const rawRisk = br * (1 - pc);
-  const risk = br >= 0.75 ? Math.max(0.60, rawRisk) : rawRisk;
-  const decision: "allow" | "interrupt" =
-    risk >= RISK_THRESHOLD ? "interrupt" : "allow";
+  const tsRawRisk = br * (1 - pc);
+  const tsRisk = br >= 0.75 ? Math.max(0.60, tsRawRisk) : tsRawRisk;
 
-  appendTrace({
-    runtime: "claudecode",
-    session_id,
-    turn_id: tool_use_id,
-    timestamp: new Date().toISOString(),
-    event: "before_tool_call",
-    tool: tool_name,
-    args: tool_input ?? {},
-    risk_score: risk,
-    blast_radius: br,
-    plan_confidence: pc,
-    decision,
-    human_outcome: null,
-  });
+  // For Bash commands, try ML model scoring via HTTP
+  const cmdStr = EXEC_TOOLS.has(tool_name.toLowerCase())
+    ? String(tool_input["command"] ?? tool_input["cmd"] ?? tool_input["input"] ?? "")
+    : "";
 
-  // Phase 0: always allow (observational).
-  // Phase 3: return "deny" or "ask" when decision === "interrupt".
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        permissionDecisionReason: `alignlayer: risk=${risk.toFixed(2)} (blast=${br.toFixed(2)}, conf=${pc.toFixed(2)})`,
-      },
-    }) + "\n"
-  );
+  const score = async () => {
+    let risk = tsRisk;
+    let source = "ts_heuristic";
+    let mlTier: number | null = null;
+
+    if (cmdStr.length > 0 && cmdStr.length <= 2000) {
+      const ml = await mlScore(cmdStr);
+      if (ml) {
+        risk = ml.risk;
+        source = "ml_model";
+        mlTier = ml.tier;
+      }
+    }
+
+    const decision: "allow" | "interrupt" =
+      risk >= RISK_THRESHOLD ? "interrupt" : "allow";
+
+    appendTrace({
+      runtime: "claudecode",
+      session_id,
+      turn_id: tool_use_id,
+      timestamp: new Date().toISOString(),
+      event: "before_tool_call",
+      tool: tool_name,
+      args: tool_input ?? {},
+      risk_score: risk,
+      blast_radius: br,
+      plan_confidence: pc,
+      decision,
+      human_outcome: null,
+    });
+
+    const reason = source === "ml_model"
+      ? `alignlayer[ml]: risk=${risk.toFixed(2)} tier=T${mlTier ?? "?"} (ts_fallback=${tsRisk.toFixed(2)})`
+      : `alignlayer[ts]: risk=${risk.toFixed(2)} (blast=${br.toFixed(2)}, conf=${pc.toFixed(2)})`;
+
+    // Phase 0: always allow (observational).
+    process.stdout.write(
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          permissionDecisionReason: reason,
+        },
+      }) + "\n"
+    );
+  };
+
+  score();
 } else if (hook_event_name === "PostToolUse") {
   appendTrace({
     runtime: "claudecode",
