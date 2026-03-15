@@ -10,7 +10,7 @@ K           ?= 5
 PID_FILE    := data/traces/.serve.pid
 PORT        ?= 8000
 
-.PHONY: eval eval-report adversarial pairs train trend serve serve-bg serve-stop docker-build docker-run help
+.PHONY: eval eval-report adversarial pairs train trend serve serve-bg serve-stop serve-install serve-uninstall serve-status docker-build docker-run help
 
 ## Run scenario benchmark against current checkpoint
 eval:
@@ -100,6 +100,48 @@ serve-stop:
 		rm -f $(PID_FILE); \
 	else \
 		echo "No PID file found at $(PID_FILE)"; \
+	fi
+
+PLIST_SRC   := scripts/com.alignlayer.scorer.plist
+PLIST_DST   := $(HOME)/Library/LaunchAgents/com.alignlayer.scorer.plist
+
+## Install launchd service (persists across reboots)
+serve-install:
+	@mkdir -p $(HOME)/.alignlayer
+	@if launchctl list com.alignlayer.scorer 2>/dev/null | grep -q PID; then \
+		echo "Service already running. Run 'make serve-uninstall' first to reinstall."; \
+	else \
+		cp $(PLIST_SRC) $(PLIST_DST); \
+		launchctl load $(PLIST_DST); \
+		sleep 5; \
+		if curl -s http://localhost:$(PORT)/health | grep -q ok; then \
+			echo "✓ Scoring server installed and running on port $(PORT)"; \
+			echo "  Log: ~/.alignlayer/scorer.log"; \
+		else \
+			echo "⚠ Service loaded but health check failed. Check ~/.alignlayer/scorer.log"; \
+		fi \
+	fi
+
+## Uninstall launchd service
+serve-uninstall:
+	@if [ -f $(PLIST_DST) ]; then \
+		launchctl unload $(PLIST_DST) 2>/dev/null; \
+		rm -f $(PLIST_DST); \
+		echo "✓ Service uninstalled"; \
+	else \
+		echo "No service installed"; \
+	fi
+
+## Check scoring server status
+serve-status:
+	@if launchctl list com.alignlayer.scorer 2>/dev/null | grep -q PID; then \
+		echo "✓ launchd service running"; \
+		curl -s http://localhost:$(PORT)/health | python3 -m json.tool 2>/dev/null || echo "  (health check failed)"; \
+	elif [ -f $(PID_FILE) ] && kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
+		echo "✓ Background process running (PID $$(cat $(PID_FILE)))"; \
+		curl -s http://localhost:$(PORT)/health | python3 -m json.tool 2>/dev/null || echo "  (health check failed)"; \
+	else \
+		echo "✗ Server not running"; \
 	fi
 
 ## Build Docker image

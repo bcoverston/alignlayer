@@ -172,23 +172,45 @@ function appendTrace(entry: TraceEntry): void {
 
 interface SessionState {
   toolCallCount: number;
+  /** tool_use_ids where we returned "ask" — PostToolUse means user approved. */
+  askedIds: string[];
+}
+
+function sessionFilePath(sessionId: string): string {
+  const dir = path.join(tracesDir(), "sessions");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, `${sessionId}.json`);
+}
+
+function loadSession(sessionId: string): SessionState {
+  try {
+    return JSON.parse(fs.readFileSync(sessionFilePath(sessionId), "utf8")) as SessionState;
+  } catch {
+    return { toolCallCount: 0, askedIds: [] };
+  }
+}
+
+function saveSession(sessionId: string, state: SessionState): void {
+  fs.writeFileSync(sessionFilePath(sessionId), JSON.stringify(state), "utf8");
 }
 
 function getAndIncrementToolIndex(sessionId: string): number {
-  const dir = path.join(tracesDir(), "sessions");
-  fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `${sessionId}.json`);
-
-  let state: SessionState = { toolCallCount: 0 };
-  try {
-    state = JSON.parse(fs.readFileSync(file, "utf8")) as SessionState;
-  } catch {
-    // first call in session — start from 0
-  }
-
+  const state = loadSession(sessionId);
   const idx = state.toolCallCount;
-  fs.writeFileSync(file, JSON.stringify({ toolCallCount: idx + 1 }), "utf8");
+  state.toolCallCount = idx + 1;
+  saveSession(sessionId, state);
   return idx;
+}
+
+function markAsked(sessionId: string, toolUseId: string): void {
+  const state = loadSession(sessionId);
+  state.askedIds.push(toolUseId);
+  saveSession(sessionId, state);
+}
+
+function wasAsked(sessionId: string, toolUseId: string): boolean {
+  const state = loadSession(sessionId);
+  return state.askedIds.includes(toolUseId);
 }
 
 // ---------------------------------------------------------------------------
@@ -293,12 +315,21 @@ if (hook_event_name === "PreToolUse") {
       ? `alignlayer[ml]: risk=${risk.toFixed(2)} tier=T${mlTier ?? "?"} (ts_fallback=${tsRisk.toFixed(2)})`
       : `alignlayer[ts]: risk=${risk.toFixed(2)} (blast=${br.toFixed(2)}, conf=${pc.toFixed(2)})`;
 
-    // Phase 0: always allow (observational).
+    // Phase 1: "ask" on high-risk commands (user sees score, can approve).
+    // Only ask when ML model scored the command — TS fallback stays observational
+    // to avoid noisy prompts when the server is down.
+    const permissionDecision: "allow" | "ask" =
+      decision === "interrupt" && source === "ml_model" ? "ask" : "allow";
+
+    if (permissionDecision === "ask") {
+      markAsked(session_id, tool_use_id);
+    }
+
     process.stdout.write(
       JSON.stringify({
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
-          permissionDecision: "allow",
+          permissionDecision,
           permissionDecisionReason: reason,
         },
       }) + "\n"
@@ -307,6 +338,10 @@ if (hook_event_name === "PreToolUse") {
 
   score();
 } else if (hook_event_name === "PostToolUse") {
+  // If we asked the user about this tool call and PostToolUse fires,
+  // it means the user approved it.
+  const humanOutcome = wasAsked(session_id, tool_use_id) ? "approved" : null;
+
   appendTrace({
     runtime: "claudecode",
     session_id,
@@ -319,7 +354,7 @@ if (hook_event_name === "PreToolUse") {
     blast_radius: null,
     plan_confidence: null,
     decision: null,
-    human_outcome: null,
+    human_outcome: humanOutcome,
   });
   // PostToolUse: no output required.
 }

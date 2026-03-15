@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.alignlayer.scorer</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/bcover/Projects/github.com/bcover/alignlayer/model/.venv/bin/python3</string>
+        <string>/Users/bcover/Projects/github.com/bcover/alignlayer/model/serve.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/bcover/Projects/github.com/bcover/alignlayer</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ALIGNLAYER_CHECKPOINT</key>
+        <string>model/checkpoints/best.pt</string>
+        <key>ALIGNLAYER_CORPUS</key>
+        <string>data/synthetic/scores-cache.jsonl</string>
+        <key>PORT</key>
+        <string>8000</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/bcover/.alignlayer/scorer.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/bcover/.alignlayer/scorer.log</string>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
