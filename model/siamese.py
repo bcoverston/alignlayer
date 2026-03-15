@@ -856,6 +856,17 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     (re.compile(r"^brew$"),       re.compile(r"^(install|upgrade|uninstall|remove|tap|untap)\b"), 1, 0.28, True),
     (re.compile(r"^brew$"),       re.compile(r""),                                         0,  0.05, True),
 
+    # xargs: risk depends on the command being invoked
+    (re.compile(r"^xargs$"),  re.compile(r"\b(rm|rmdir)\b"),                              4,  0.80, False),
+    (re.compile(r"^xargs$"),  re.compile(r"\b(chmod|chown|mv|kill)\b"),                   2,  0.45, False),
+    (re.compile(r"^xargs$"),  re.compile(r"\b(grep|cat|ls|echo|file|stat|wc|head|tail)\b"), 0, 0.05, True),
+
+    # nc/ncat/socat: listeners and reverse shells are high-risk
+    (re.compile(r"^(nc|ncat|netcat)$"), re.compile(r"-[a-z]*e\s+/bin/(ba)?sh"),           -2, 0.95, False),
+    (re.compile(r"^(nc|ncat|netcat)$"), re.compile(r"-[a-z]*l"),                           3, 0.65, False),
+    (re.compile(r"^socat$"),  re.compile(r"EXEC:|exec:|SYSTEM:|system:"),                  -2, 0.95, False),
+    (re.compile(r"^socat$"),  re.compile(r"TCP-LISTEN|tcp-listen"),                         3, 0.65, False),
+
     # done/fi/esac — closing keywords only, never risky on their own
     (re.compile(r"^(done|fi|esac)$"), re.compile(r""), 0, 0.03, True),
 ]
@@ -891,7 +902,9 @@ _EXFIL_EXEC_RE = re.compile(
     # env var credential exfil
     r"|AWS_ACCESS_KEY_ID=\S+\s+AWS_SECRET_ACCESS_KEY=\S+\s+aws\s+s3\s+(sync|cp)\s+/"
     # curl posting secrets/tokens to external URLs
-    r"|curl\s+.*Authorization.*\$\w*(SECRET|TOKEN|KEY|PASS)",
+    r"|curl\s+.*Authorization.*\$\w*(SECRET|TOKEN|KEY|PASS)"
+    # curl file upload: -F file=@<path> or --form file=@<path>
+    r"|curl\s+.*(-F|--form)\s+\S*=@\S+",
     re.IGNORECASE,
 )
 
@@ -936,6 +949,9 @@ def _parse_cli_verb(cmd: str) -> tuple[str, str]:
         else:
             break
     tool = parts[0].lower()
+    # Strip directory paths: /usr/bin/rm → rm, ./script.sh → script.sh
+    if "/" in tool:
+        tool = tool.rsplit("/", 1)[-1]
     remainder = " ".join(parts[1:]).lower()
     # Unwrap `python3 -m <module>` → tool=module, remainder=rest
     if tool in ("python3", "python", "python3.10", "python3.11", "python3.12", "python3.13", "python3.14") \
@@ -961,7 +977,8 @@ def _verb_table_lookup(cmd: str) -> dict | None:
             "aws", "kubectl", "git", "redis-cli", "ssh", "docker", "podman",
             "find", "gh", "psql", "terraform", "nginx", "ssh-keygen", "ssh-keyscan",
             "pip", "pip3", "npm", "yarn", "pnpm", "journalctl", "curl", "sed",
-            "helm", "systemctl", "brew",
+            "helm", "systemctl", "brew", "xargs",
+            "nc", "ncat", "netcat", "socat",
         } else first_pos
         if verb_re.search(target):
             return {"tier": tier, "risk": risk, "is_cap": is_cap, "heuristic": "verb_table"}
