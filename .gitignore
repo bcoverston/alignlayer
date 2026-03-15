@@ -20,6 +20,9 @@ data/synthetic/scores-cache.jsonl
 # Environment config
 .env
 
+# Trace analysis (contains real session data with potential secrets)
+data/trace_analysis.json
+
 # Runtime artifacts
 *.pid
 *.log
