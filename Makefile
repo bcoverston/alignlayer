@@ -158,6 +158,32 @@ docker-run:
 		-e ALIGNLAYER_CHECKPOINT=model/checkpoints/best.pt \
 		$(IMAGE)
 
+## Score a single command via the server: make score CMD="rm -rf /"
+score:
+	@if [ -z "$(CMD)" ]; then echo "Usage: make score CMD=\"your command here\""; exit 1; fi
+	@curl -sf -X POST http://localhost:$(PORT)/explain \
+		-H 'Content-Type: application/json' \
+		-d "{\"command\": \"$(CMD)\"}" 2>/dev/null \
+	| python3 -c "$$SCORE_FMT" || echo "Server not running. Start with: make serve-install"
+
+define SCORE_FMT
+import sys, json
+d = json.load(sys.stdin)
+tier, risk, src, dec = d['tier'], d['risk'], d['source'], d['decision']
+bar = '\u2588' * int(risk * 20)
+c = {-2:'31',-1:'32',0:'34',1:'36',2:'33',3:'33',4:'31'}.get(tier,'0')
+print(f'\033[{c}mT{tier:+d}\033[0m  risk={risk:.3f}  {bar:20s}  [{src}]  {dec}')
+print()
+for e in d.get('explanation', []):
+    print(f'  \u2022 {e}')
+ns = d.get('neighbors', [])
+if ns:
+    print(f'\n  Nearest neighbors:')
+    for n in ns:
+        print(f'    T{n["tier"]:+d} r={n["risk"]:.3f} d={n["dist"]:.3f}  {n["command"][:65]}')
+endef
+export SCORE_FMT
+
 help:
-	@echo "Targets: eval adversarial eval-report pairs train trend serve serve-bg serve-stop docker-build docker-run"
-	@echo "Overrides: CHECKPOINT=... CORPUS=... K=... PORT=... IMAGE=..."
+	@echo "Targets: eval adversarial eval-report pairs train trend serve serve-bg serve-stop score docker-build docker-run"
+	@echo "Overrides: CHECKPOINT=... CORPUS=... K=... PORT=... CMD=... IMAGE=..."

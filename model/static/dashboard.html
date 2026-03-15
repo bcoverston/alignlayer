@@ -47,7 +47,7 @@
   .tail { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
   .tail-header { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
   .tail-body { max-height: 500px; overflow-y: auto; font-size: 12px; }
-  .tail-entry { padding: 6px 12px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 140px 70px 80px 60px 1fr; gap: 8px; align-items: center; }
+  .tail-entry { padding: 6px 12px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 140px 70px 80px 60px 1fr 52px; gap: 8px; align-items: center; }
   .tail-entry:hover { background: rgba(88,166,255,0.05); }
   .tail-ts { color: var(--text-dim); font-size: 11px; }
   .tail-tool { color: var(--accent); }
@@ -78,6 +78,34 @@
   .decision-bar { display: flex; height: 24px; border-radius: 4px; overflow: hidden; margin-top: 4px; }
   .decision-allow { background: var(--green); }
   .decision-interrupt { background: var(--red); }
+
+  /* Explainer panel */
+  .explain-input { display: flex; gap: 8px; margin-bottom: 12px; }
+  .explain-input input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+  .explain-input button { background: var(--accent); color: var(--bg); border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; }
+  .explain-input button:hover { opacity: 0.85; }
+  .explain-result { font-size: 12px; line-height: 1.6; }
+  .explain-result .tier-badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-weight: bold; font-size: 13px; }
+  .explain-result .neighbors { margin-top: 8px; }
+  .explain-result .neighbor { color: var(--text-dim); padding: 2px 0; }
+
+  /* Threshold slider */
+  .threshold-slider { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .threshold-slider input[type="range"] { flex: 1; accent-color: var(--accent); }
+  .threshold-slider .value { font-size: 16px; font-weight: bold; color: var(--accent); min-width: 40px; }
+
+  /* Feedback buttons */
+  .fb-btns { display: flex; gap: 4px; flex-shrink: 0; }
+  .fb-btn { background: none; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; padding: 1px 5px; font-size: 12px; line-height: 1; opacity: 0.4; transition: opacity 0.15s; }
+  .fb-btn:hover { opacity: 1; }
+  .fb-btn.voted { opacity: 1; border-color: var(--accent); }
+  .fb-btn-up { color: var(--green); }
+  .fb-btn-down { color: var(--red); }
+
+  /* Feedback summary */
+  .fb-summary { display: flex; gap: 12px; margin-top: 8px; font-size: 12px; }
+  .fb-correct { color: var(--green); }
+  .fb-incorrect { color: var(--red); }
 </style>
 </head>
 <body>
@@ -118,8 +146,12 @@
   </div>
 
   <div class="grid">
-    <div class="card two-col">
-      <h2>Threshold Simulator</h2>
+    <div class="card">
+      <h2>Threshold</h2>
+      <div class="threshold-slider">
+        <input type="range" id="threshold-slider" min="0.2" max="0.9" step="0.05" value="0.55">
+        <span class="value" id="threshold-value">0.55</span>
+      </div>
       <p style="font-size:11px;color:var(--text-dim);margin-bottom:8px">What-if: interrupt rate at different thresholds</p>
       <table class="threshold-table" id="threshold-table">
         <tr><td colspan="4" style="color:var(--text-dim)">Loading...</td></tr>
@@ -131,6 +163,26 @@
         <span style="color:var(--text-dim)">Loading...</span>
       </div>
       <div id="outcome-detail" style="margin-top:8px;font-size:11px"></div>
+    </div>
+    <div class="card">
+      <h2>Feedback</h2>
+      <div class="fb-summary" id="fb-summary">
+        <span style="color:var(--text-dim)">Loading...</span>
+      </div>
+      <div id="fb-detail" style="margin-top:8px;font-size:11px;color:var(--text-dim)">
+        Use thumbs on tail entries to rate decisions
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card wide">
+      <h2>Score Explainer</h2>
+      <div class="explain-input">
+        <input type="text" id="explain-cmd" placeholder="Enter a command to explain..." />
+        <button onclick="runExplain()">Explain</button>
+      </div>
+      <div class="explain-result" id="explain-result"></div>
     </div>
   </div>
 
@@ -262,16 +314,149 @@ async function updateTail() {
       const tierStr = tier != null ? tierLabel(tier) : e.tool;
       const tierCls = tier != null ? tierClass(tier) : '';
 
+      const cmdEsc = cmd.replace(/</g, '&lt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      const cmdForFb = cmd.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+      const fbBtns = isExec
+        ? `<span class="fb-btns">` +
+          `<button class="fb-btn fb-btn-up" onclick="sendFeedback('${cmdForFb}',${e.ml_risk},${tier},'${e.ml_heuristic||''}','${e.ml_decision||'allow'}','correct',this)" title="Good decision">&#x1F44D;</button>` +
+          `<button class="fb-btn fb-btn-down" onclick="sendFeedback('${cmdForFb}',${e.ml_risk},${tier},'${e.ml_heuristic||''}','${e.ml_decision||'allow'}','incorrect',this)" title="Bad decision">&#x1F44E;</button>` +
+          `</span>`
+        : `<span></span>`;
+
       return `<div class="tail-entry">
         <span class="tail-ts">${ts} ${e.event === 'PostToolUse' ? '←' : '→'}</span>
         <span class="tail-tool">${tool}</span>
         <span class="tail-tier ${tierCls}" style="${tier != null ? `background:${tierColor('T' + (tier >= 0 ? '+' : '') + tier)}22;color:${tierColor('T' + (tier >= 0 ? '+' : '') + tier)}` : ''}">${tierStr}</span>
         <span class="tail-risk" style="color:${isExec ? riskColor(e.ml_risk) : 'var(--text-dim)'}">${risk}</span>
-        <span class="tail-cmd ${isExec ? '' : 'non-exec'}">${cmd.replace(/</g, '&lt;')}</span>
+        <span class="tail-cmd ${isExec ? '' : 'non-exec'}" title="${cmdEsc}">${cmdEsc}</span>
+        ${fbBtns}
       </div>`;
     }).join('');
   } catch (e) {}
 }
+
+// --- Feedback ---
+async function sendFeedback(cmd, risk, tier, source, decision, judgment, btn) {
+  try {
+    await fetch(API + '/feedback', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command: cmd, risk, tier, source, decision, judgment}),
+    });
+    // Mark voted
+    const parent = btn.parentElement;
+    parent.querySelectorAll('.fb-btn').forEach(b => b.classList.remove('voted'));
+    btn.classList.add('voted');
+  } catch (e) {}
+}
+
+async function updateFeedback() {
+  try {
+    const data = await fetchJSON('/feedback');
+    const el = document.getElementById('fb-summary');
+    if (data.total === 0) {
+      el.innerHTML = '<span style="color:var(--text-dim)">No feedback yet</span>';
+      return;
+    }
+    el.innerHTML = `
+      <span class="fb-correct">&#x1F44D; ${data.correct} correct</span>
+      <span class="fb-incorrect">&#x1F44E; ${data.incorrect} incorrect</span>
+      <span style="color:var(--text-dim)">${data.total} total</span>
+    `;
+    const detail = document.getElementById('fb-detail');
+    let html = '';
+    if (data.accuracy !== null) {
+      html += `Model accuracy (human-judged): ${(data.accuracy * 100).toFixed(0)}%<br>`;
+    }
+    if (data.false_positives > 0) {
+      html += `<span style="color:var(--yellow)">FP: ${data.false_positives} (interrupted but shouldn't have)</span><br>`;
+    }
+    if (data.false_negatives > 0) {
+      html += `<span style="color:var(--yellow)">FN: ${data.false_negatives} (allowed but shouldn't have)</span>`;
+    }
+    detail.innerHTML = html;
+  } catch (e) {}
+}
+
+// --- Explainer ---
+async function runExplain() {
+  const cmd = document.getElementById('explain-cmd').value.trim();
+  if (!cmd) return;
+  const el = document.getElementById('explain-result');
+  el.innerHTML = '<span style="color:var(--text-dim)">Scoring...</span>';
+  try {
+    const data = await fetch(API + '/explain', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command: cmd}),
+    }).then(r => r.json());
+
+    const tc = tierColor('T' + (data.tier >= 0 ? '+' : '') + data.tier);
+    let html = `<span class="tier-badge" style="background:${tc}22;color:${tc}">${tierLabel(data.tier)}</span> `;
+    html += `<span style="color:${riskColor(data.risk)}">risk=${data.risk.toFixed(3)}</span> `;
+    html += `<span style="color:var(--text-dim)">[${data.source}]</span> `;
+    html += `<span style="color:${data.decision === 'interrupt' ? 'var(--red)' : 'var(--green)'}">${data.decision}</span>`;
+    html += '<div style="margin-top:8px">';
+    for (const e of data.explanation || []) {
+      html += `<div style="color:var(--text-dim)">• ${e}</div>`;
+    }
+    html += '</div>';
+    if (data.neighbors && data.neighbors.length > 0) {
+      html += '<div class="neighbors" style="margin-top:8px"><div style="color:var(--text-dim);margin-bottom:4px">Nearest corpus neighbors:</div>';
+      for (const n of data.neighbors) {
+        const nc = tierColor('T' + (n.tier >= 0 ? '+' : '') + n.tier);
+        html += `<div class="neighbor"><span style="color:${nc}">T${n.tier >= 0 ? '+' : ''}${n.tier}</span> r=${n.risk.toFixed(3)} d=${n.dist.toFixed(3)}  ${n.command.slice(0, 70).replace(/</g, '&lt;')}</div>`;
+      }
+      html += '</div>';
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '<span style="color:var(--red)">Error — is the server running?</span>';
+  }
+}
+
+// Enter key triggers explain
+document.addEventListener('DOMContentLoaded', () => {
+  const input = document.getElementById('explain-cmd');
+  if (input) input.addEventListener('keydown', (e) => { if (e.key === 'Enter') runExplain(); });
+});
+
+// --- Threshold slider ---
+const slider = document.getElementById('threshold-slider');
+const sliderValue = document.getElementById('threshold-value');
+let sliderTimeout = null;
+
+if (slider) {
+  slider.addEventListener('input', () => {
+    sliderValue.textContent = parseFloat(slider.value).toFixed(2);
+  });
+  slider.addEventListener('change', () => {
+    const val = parseFloat(slider.value);
+    clearTimeout(sliderTimeout);
+    sliderTimeout = setTimeout(async () => {
+      try {
+        const res = await fetch(API + '/config', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({threshold: val}),
+        });
+        const data = await res.json();
+        sliderValue.textContent = data.threshold.toFixed(2);
+      } catch (e) {}
+    }, 200);
+  });
+}
+
+// Load current threshold on startup
+(async () => {
+  try {
+    const cfg = await fetchJSON('/config');
+    if (slider && cfg.threshold) {
+      slider.value = cfg.threshold;
+      sliderValue.textContent = cfg.threshold.toFixed(2);
+    }
+  } catch (e) {}
+})();
 
 async function updateThresholdSim() {
   try {
@@ -328,7 +513,7 @@ async function updateOutcomes() {
 }
 
 async function poll() {
-  await Promise.all([updateStats(), updateTail(), updateThresholdSim(), updateOutcomes()]);
+  await Promise.all([updateStats(), updateTail(), updateThresholdSim(), updateOutcomes(), updateFeedback()]);
   setTimeout(poll, POLL_MS);
 }
 

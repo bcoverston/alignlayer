@@ -38,7 +38,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from siamese import build_reference_index, load_model, predict_risk
+import torch
+from siamese import build_reference_index, embed_command, load_model, predict_risk
 
 # ---------------------------------------------------------------------------
 # Config
@@ -47,7 +48,12 @@ from siamese import build_reference_index, load_model, predict_risk
 CHECKPOINT = os.environ.get("ALIGNLAYER_CHECKPOINT", "model/checkpoints/best.pt")
 CORPUS     = os.environ.get("ALIGNLAYER_CORPUS",     "data/synthetic/scores-cache.jsonl")
 K          = int(os.environ.get("ALIGNLAYER_K",         "5"))
-THRESHOLD  = float(os.environ.get("ALIGNLAYER_THRESHOLD", "0.55"))
+
+# Mutable runtime config
+_config: dict[str, Any] = {
+    "threshold": float(os.environ.get("ALIGNLAYER_THRESHOLD", "0.55")),
+}
+FEEDBACK_FILE = Path("data/traces/feedback.jsonl")
 TRACES_DIR = Path(os.environ.get("ALIGNLAYER_TRACES_DIR", "data/traces"))
 # Hook traces (written by the TS hook, separate from server traces)
 HOOK_TRACES_DIR = Path.home() / ".alignlayer" / "traces"
@@ -140,7 +146,7 @@ def _score_one(command: str) -> ScoreResponse:
         _state["ref_entries"],
         k=K,
     )
-    decision = "interrupt" if result["risk"] >= THRESHOLD else "allow"
+    decision = "interrupt" if result["risk"] >= _config["threshold"] else "allow"
     return ScoreResponse(
         command=command,
         risk=round(result["risk"], 4),
@@ -189,6 +195,163 @@ def score(req: ScoreRequest) -> ScoreResponse:
 @app.post("/batch", response_model=BatchScoreResponse)
 def batch(req: BatchScoreRequest) -> BatchScoreResponse:
     return BatchScoreResponse(results=[_score_one(cmd) for cmd in req.commands])
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — explain
+# ---------------------------------------------------------------------------
+
+@app.post("/explain")
+def explain(req: ScoreRequest) -> dict:
+    """Detailed scoring breakdown: which heuristic, why, nearest neighbors."""
+    result = predict_risk(
+        req.command,
+        _state["model"], _state["dev"],
+        _state["ref_embs"], _state["ref_entries"],
+        k=K,
+    )
+    tier = result["tier"]
+    risk = result["risk"]
+    source = result.get("heuristic") or result.get("source", "unknown")
+    decision = "interrupt" if risk >= _config["threshold"] else "allow"
+
+    # Always include nearest neighbors for context (predict_risk may skip them
+    # when heuristics or RiskHead fire early)
+    neighbors = result.get("neighbors", [])
+    if not neighbors:
+        emb = embed_command(req.command, _state["model"], _state["dev"])
+        dists = torch.norm(_state["ref_embs"] - emb.unsqueeze(0), dim=1)
+        topk = dists.topk(K, largest=False)
+        neighbors = []
+        for i, d in zip(topk.indices.tolist(), topk.values.tolist()):
+            e = _state["ref_entries"][i]
+            neighbors.append({"command": e.get("text", e.get("command", "")),
+                              "risk": e["risk"], "tier": e["tier"], "dist": d})
+
+    neighbors = [
+        {"command": n["command"], "risk": round(n["risk"], 3),
+         "tier": n["tier"], "dist": round(n.get("dist", 0), 4)}
+        for n in neighbors[:5]
+    ]
+
+    # Build human-readable explanation
+    explanations = []
+    if source == "exfil_exec":
+        explanations.append("Matched exfiltration/RCE pattern (pipe-to-shell, credential exfil, file upload)")
+    elif source == "dry_run_cap":
+        explanations.append("Detected dry-run/preview flag — risk capped at T-1")
+    elif source == "verb_table":
+        explanations.append(f"Matched verb table rule for this tool+subcommand combination")
+    elif source == "opaque_exec":
+        explanations.append("Opaque code execution (eval, python -c, pipe-to-sh) — floor at T2")
+    elif source == "risk_head":
+        explanations.append("Scored by RiskHead MLP on command embedding")
+    elif source == "knn":
+        explanations.append("Scored by k-NN lookup against reference corpus")
+
+    if risk >= _config["threshold"]:
+        explanations.append(f"Risk {risk:.3f} >= threshold {_config['threshold']:.2f} → would interrupt")
+    else:
+        explanations.append(f"Risk {risk:.3f} < threshold {_config['threshold']:.2f} → allowed")
+
+    return {
+        "command": req.command,
+        "risk": round(risk, 4),
+        "tier": tier,
+        "decision": decision,
+        "source": source,
+        "explanation": explanations,
+        "neighbors": neighbors,
+        "threshold": _config["threshold"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — config (runtime-adjustable)
+# ---------------------------------------------------------------------------
+
+class ConfigUpdate(BaseModel):
+    threshold: float | None = None
+
+
+@app.get("/config")
+def get_config() -> dict:
+    return dict(_config)
+
+
+@app.put("/config")
+def update_config(update: ConfigUpdate) -> dict:
+    if update.threshold is not None:
+        if not (0.0 <= update.threshold <= 1.0):
+            return {"error": "threshold must be between 0 and 1"}
+        _config["threshold"] = update.threshold
+        logger.info("Threshold updated to %.2f", update.threshold)
+    return dict(_config)
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — feedback
+# ---------------------------------------------------------------------------
+
+class FeedbackRequest(BaseModel):
+    command: str
+    risk: float
+    tier: int
+    source: str | None = None
+    decision: str          # "allow" | "interrupt"
+    judgment: str          # "correct" | "incorrect"
+    note: str | None = None
+
+
+@app.post("/feedback")
+def submit_feedback(req: FeedbackRequest) -> dict:
+    """Record human judgment on a scoring decision."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "command": req.command,
+        "risk": req.risk,
+        "tier": req.tier,
+        "source": req.source,
+        "decision": req.decision,
+        "judgment": req.judgment,
+        "note": req.note,
+    }
+    FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(FEEDBACK_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    logger.info("feedback: %s on %s (risk=%.2f tier=%d) %s",
+                req.judgment, req.decision, req.risk, req.tier, req.command[:60])
+    return {"status": "ok"}
+
+
+@app.get("/feedback")
+def get_feedback() -> dict:
+    """Retrieve all feedback entries."""
+    entries = []
+    if FEEDBACK_FILE.exists():
+        for line in FEEDBACK_FILE.read_text().splitlines():
+            if line.strip():
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    pass
+
+    correct = sum(1 for e in entries if e.get("judgment") == "correct")
+    incorrect = sum(1 for e in entries if e.get("judgment") == "incorrect")
+
+    # Group incorrect by decision type for analysis
+    false_positives = [e for e in entries if e["judgment"] == "incorrect" and e["decision"] == "interrupt"]
+    false_negatives = [e for e in entries if e["judgment"] == "incorrect" and e["decision"] == "allow"]
+
+    return {
+        "total": len(entries),
+        "correct": correct,
+        "incorrect": incorrect,
+        "accuracy": round(correct / len(entries), 4) if entries else None,
+        "false_positives": len(false_positives),
+        "false_negatives": len(false_negatives),
+        "entries": entries,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -246,11 +409,11 @@ async def observe(request: Request) -> dict:
                 {"command": n["command"], "risk": n["risk"], "tier": n["tier"], "dist": n["dist"]}
                 for n in result.get("neighbors", [])[:3]
             ]
-            trace["ml_decision"] = "interrupt" if result.get("risk", 0) >= THRESHOLD else "allow"
+            trace["ml_decision"] = "interrupt" if result.get("risk", 0) >= _config["threshold"] else "allow"
 
             tier = result.get("tier", 0)
             risk = result.get("risk", 0)
-            marker = " ⚠" if risk >= THRESHOLD else ""
+            marker = " ⚠" if risk >= _config["threshold"] else ""
             logger.info("observe %s T%+d risk=%.2f %s%s",
                         event, tier, risk, cmd[:80], marker)
         except Exception as exc:
