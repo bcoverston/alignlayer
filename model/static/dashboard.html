@@ -96,9 +96,12 @@
 
   /* Feedback buttons */
   .fb-btns { display: flex; gap: 4px; flex-shrink: 0; }
-  .fb-btn { background: none; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; padding: 1px 5px; font-size: 12px; line-height: 1; opacity: 0.4; transition: opacity 0.15s; }
-  .fb-btn:hover { opacity: 1; }
-  .fb-btn.voted { opacity: 1; border-color: var(--accent); }
+  .fb-btn { background: none; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; padding: 1px 5px; font-size: 12px; line-height: 1; opacity: 0.3; transition: all 0.2s; }
+  .fb-btn:hover { opacity: 0.8; }
+  .fb-btn.voted { opacity: 1; transform: scale(1.15); }
+  .fb-btn.voted.fb-btn-up { border-color: var(--green); background: rgba(63,185,80,0.15); }
+  .fb-btn.voted.fb-btn-down { border-color: var(--red); background: rgba(248,81,73,0.15); }
+  .fb-btn.dimmed { opacity: 0.15; pointer-events: none; }
   .fb-btn-up { color: var(--green); }
   .fb-btn-down { color: var(--red); }
 
@@ -198,6 +201,9 @@
 <script>
 const API = window.location.origin;
 const POLL_MS = 3000;
+
+// Track which entries have been voted on (survives tail refreshes)
+const votedEntries = new Map(); // key: cmd+risk → judgment
 
 function tierClass(tier) {
   const map = { '-2': 'T-2', '-1': 'T-1', '0': 'T0', '1': 'T1', '2': 'T2', '3': 'T3', '4': 'T4' };
@@ -316,10 +322,14 @@ async function updateTail() {
 
       const cmdEsc = cmd.replace(/</g, '&lt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
       const cmdForFb = cmd.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+      const voteKey = `${cmd.slice(0,100)}|${e.ml_risk}`;
+      const priorVote = votedEntries.get(voteKey);
+      const upCls = priorVote === 'correct' ? 'voted' : (priorVote ? 'dimmed' : '');
+      const dnCls = priorVote === 'incorrect' ? 'voted' : (priorVote ? 'dimmed' : '');
       const fbBtns = isExec
         ? `<span class="fb-btns">` +
-          `<button class="fb-btn fb-btn-up" onclick="sendFeedback('${cmdForFb}',${e.ml_risk},${tier},'${e.ml_heuristic||''}','${e.ml_decision||'allow'}','correct',this)" title="Good decision">&#x1F44D;</button>` +
-          `<button class="fb-btn fb-btn-down" onclick="sendFeedback('${cmdForFb}',${e.ml_risk},${tier},'${e.ml_heuristic||''}','${e.ml_decision||'allow'}','incorrect',this)" title="Bad decision">&#x1F44E;</button>` +
+          `<button class="fb-btn fb-btn-up ${upCls}" onclick="sendFeedback('${cmdForFb}',${e.ml_risk},${tier},'${e.ml_heuristic||''}','${e.ml_decision||'allow'}','correct',this)" title="Good decision">&#x1F44D;</button>` +
+          `<button class="fb-btn fb-btn-down ${dnCls}" onclick="sendFeedback('${cmdForFb}',${e.ml_risk},${tier},'${e.ml_heuristic||''}','${e.ml_decision||'allow'}','incorrect',this)" title="Bad decision">&#x1F44E;</button>` +
           `</span>`
         : `<span></span>`;
 
@@ -337,16 +347,40 @@ async function updateTail() {
 
 // --- Feedback ---
 async function sendFeedback(cmd, risk, tier, source, decision, judgment, btn) {
+  const parent = btn.parentElement;
+  const isAlreadyVoted = btn.classList.contains('voted');
+
+  // Toggle off if clicking the same button again
+  if (isAlreadyVoted) {
+    const voteKey = `${cmd.slice(0,100)}|${risk}`;
+    votedEntries.delete(voteKey);
+    parent.querySelectorAll('.fb-btn').forEach(b => {
+      b.classList.remove('voted', 'dimmed');
+    });
+    return;
+  }
+
   try {
-    await fetch(API + '/feedback', {
+    const res = await fetch(API + '/feedback', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({command: cmd, risk, tier, source, decision, judgment}),
     });
-    // Mark voted
-    const parent = btn.parentElement;
-    parent.querySelectorAll('.fb-btn').forEach(b => b.classList.remove('voted'));
-    btn.classList.add('voted');
+    if (!res.ok) return;
+
+    // Track vote so it survives tail refreshes
+    const voteKey = `${cmd.slice(0,100)}|${risk}`;
+    votedEntries.set(voteKey, judgment);
+
+    // Visual confirmation: highlight voted button, dim the other
+    parent.querySelectorAll('.fb-btn').forEach(b => {
+      b.classList.remove('voted', 'dimmed');
+      if (b === btn) {
+        b.classList.add('voted');
+      } else {
+        b.classList.add('dimmed');
+      }
+    });
   } catch (e) {}
 }
 
