@@ -232,6 +232,7 @@ const POLL_MS = 3000;
 
 // Track which entries have been voted on (survives tail refreshes)
 const votedEntries = new Map(); // key: cmd+risk → judgment
+let lastTailHash = '';           // skip re-render if nothing changed
 
 function tierClass(tier) {
   const map = { '-2': 'T-2', '-1': 'T-1', '0': 'T0', '1': 'T1', '2': 'T2', '3': 'T3', '4': 'T4' };
@@ -335,9 +336,14 @@ async function updateStats() {
 async function updateTail() {
   try {
     const data = await fetchJSON('/traces/tail?n=100');
-    const body = document.getElementById('tail-body');
     document.getElementById('tail-count').textContent = `${data.count} events`;
 
+    // Skip DOM rebuild if data hasn't changed (preserves vote button state)
+    const hash = data.entries.map(e => `${e.ts}|${e.tool}|${e.event}`).join('\n');
+    if (hash === lastTailHash) return;
+    lastTailHash = hash;
+
+    const body = document.getElementById('tail-body');
     body.innerHTML = data.entries.map(e => {
       const ts = formatTime(e.ts);
       const tool = e.tool || 'unknown';
@@ -349,15 +355,18 @@ async function updateTail() {
       const tierCls = tier != null ? tierClass(tier) : '';
 
       const cmdEsc = cmd.replace(/</g, '&lt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-      const cmdForFb = cmd.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
       const voteKey = `${cmd.slice(0,100)}|${e.ml_risk}`;
       const priorVote = votedEntries.get(voteKey);
       const upCls = priorVote === 'correct' ? 'voted' : (priorVote ? 'dimmed' : '');
       const dnCls = priorVote === 'incorrect' ? 'voted' : (priorVote ? 'dimmed' : '');
+      // Store feedback data as data-attributes (avoids inline onclick escaping bugs)
+      const fbData = isExec
+        ? `data-fb-cmd="${cmdEsc}" data-fb-risk="${e.ml_risk}" data-fb-tier="${tier}" data-fb-source="${(e.ml_heuristic||'').replace(/"/g,'&quot;')}" data-fb-decision="${e.ml_decision||'allow'}"`
+        : '';
       const fbBtns = isExec
         ? `<span class="fb-btns">` +
-          `<button class="fb-btn fb-btn-up ${upCls}" onclick="sendFeedback('${cmdForFb}',${e.ml_risk},${tier},'${e.ml_heuristic||''}','${e.ml_decision||'allow'}','correct',this)" title="Good decision">&#x1F44D;</button>` +
-          `<button class="fb-btn fb-btn-down ${dnCls}" onclick="sendFeedback('${cmdForFb}',${e.ml_risk},${tier},'${e.ml_heuristic||''}','${e.ml_decision||'allow'}','incorrect',this)" title="Bad decision">&#x1F44E;</button>` +
+          `<button class="fb-btn fb-btn-up ${upCls}" ${fbData} data-fb-judgment="correct" title="Good decision">&#x1F44D;</button>` +
+          `<button class="fb-btn fb-btn-down ${dnCls}" ${fbData} data-fb-judgment="incorrect" title="Bad decision">&#x1F44E;</button>` +
           `</span>`
         : `<span></span>`;
 
@@ -373,18 +382,25 @@ async function updateTail() {
   } catch (e) {}
 }
 
-// --- Feedback ---
-async function sendFeedback(cmd, risk, tier, source, decision, judgment, btn) {
+// --- Feedback (event delegation — survives DOM re-renders) ---
+document.getElementById('tail-body').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('.fb-btn');
+  if (!btn) return;
+  ev.stopPropagation();
+
+  const cmd = btn.dataset.fbCmd;
+  const risk = parseFloat(btn.dataset.fbRisk);
+  const tier = parseInt(btn.dataset.fbTier, 10);
+  const source = btn.dataset.fbSource || '';
+  const decision = btn.dataset.fbDecision || 'allow';
+  const judgment = btn.dataset.fbJudgment;
   const parent = btn.parentElement;
-  const isAlreadyVoted = btn.classList.contains('voted');
+  const voteKey = `${cmd.slice(0,100)}|${risk}`;
 
   // Toggle off if clicking the same button again
-  if (isAlreadyVoted) {
-    const voteKey = `${cmd.slice(0,100)}|${risk}`;
+  if (btn.classList.contains('voted')) {
     votedEntries.delete(voteKey);
-    parent.querySelectorAll('.fb-btn').forEach(b => {
-      b.classList.remove('voted', 'dimmed');
-    });
+    parent.querySelectorAll('.fb-btn').forEach(b => b.classList.remove('voted', 'dimmed'));
     return;
   }
 
@@ -396,21 +412,14 @@ async function sendFeedback(cmd, risk, tier, source, decision, judgment, btn) {
     });
     if (!res.ok) return;
 
-    // Track vote so it survives tail refreshes
-    const voteKey = `${cmd.slice(0,100)}|${risk}`;
     votedEntries.set(voteKey, judgment);
-
-    // Visual confirmation: highlight voted button, dim the other
     parent.querySelectorAll('.fb-btn').forEach(b => {
       b.classList.remove('voted', 'dimmed');
-      if (b === btn) {
-        b.classList.add('voted');
-      } else {
-        b.classList.add('dimmed');
-      }
+      if (b === btn) b.classList.add('voted');
+      else b.classList.add('dimmed');
     });
   } catch (e) {}
-}
+});
 
 async function updateFeedback() {
   try {
