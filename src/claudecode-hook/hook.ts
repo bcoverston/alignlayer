@@ -137,6 +137,10 @@ interface TraceEntry {
   blast_radius: number | null;
   plan_confidence: number | null;
   decision: "allow" | "interrupt" | null;
+  /** Which scorer produced risk_score: "ml_model" or "ts_heuristic". */
+  source: "ml_model" | "ts_heuristic" | null;
+  /** TS heuristic score (always present on before_tool_call for comparison). */
+  ts_risk: number | null;
   /** Populated in Phase 3 when hook returns "deny"/"ask" and user decides. */
   human_outcome: "approved" | "denied" | "allow-always" | null;
 }
@@ -308,6 +312,8 @@ if (hook_event_name === "PreToolUse") {
       blast_radius: br,
       plan_confidence: pc,
       decision,
+      source: source as "ml_model" | "ts_heuristic",
+      ts_risk: tsRisk,
       human_outcome: null,
     });
 
@@ -354,6 +360,8 @@ if (hook_event_name === "PreToolUse") {
     blast_radius: null,
     plan_confidence: null,
     decision: null,
+    source: null,
+    ts_risk: null,
     human_outcome: humanOutcome,
   });
   // PostToolUse: no output required.

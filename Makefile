@@ -10,7 +10,7 @@ K           ?= 5
 PID_FILE    := data/traces/.serve.pid
 PORT        ?= 8000
 
-.PHONY: eval eval-report adversarial pairs train trend serve serve-bg serve-stop serve-install serve-uninstall serve-status docker-build docker-run help
+.PHONY: eval eval-report adversarial pairs train trend harvest harvest-apply harvest-retrain serve serve-bg serve-stop serve-install serve-uninstall serve-status docker-build docker-run help
 
 ## Run scenario benchmark against current checkpoint
 eval:
@@ -57,6 +57,18 @@ print(f\"{'Run':25s} {'Acc':>6} {'FN T3+T4':>9} {'FP T0':>7} {'corpus':>8}\"); \
 print('-'*60); \
 prev = None; \
 [print(f\"{r['run_id'][:25]} {r['overall_acc']:6.3f} {r['fn_rate_t3_t4']:9.3f} {r['fp_rate_t0_t1']:7.3f} {r['corpus_size']:8,}\") for r in rows]"
+
+## Preview feedback corrections (dry run)
+harvest:
+	$(PYTHON) scripts/harvest_feedback.py
+
+## Apply feedback corrections to corpus
+harvest-apply:
+	$(PYTHON) scripts/harvest_feedback.py --apply
+
+## Apply corrections + retrain RiskHead MLP
+harvest-retrain:
+	$(PYTHON) scripts/harvest_feedback.py --retrain
 
 ## Run scoring server locally (foreground)
 serve:
