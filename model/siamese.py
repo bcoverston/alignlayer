@@ -1179,6 +1179,121 @@ def _apply_compensating_cap(
     return result
 
 
+def compare_scorers(
+    cmd: str,
+    model: CommandEncoder,
+    dev: torch.device,
+    ref_embs: torch.Tensor,
+    ref_entries: list[dict],
+    k: int = 5,
+) -> dict:
+    """Run every scorer independently on a command and return all results.
+
+    Unlike predict_risk (which short-circuits on the first matching heuristic),
+    this runs every path so the caller can see where scorers agree/disagree.
+    """
+    results: dict[str, dict] = {}
+
+    # 1. Dry-run detection
+    dr = is_dry_run(cmd)
+    results["dry_run"] = {
+        "triggered": dr,
+        "risk": 0.12 if dr else None,
+        "tier": -1 if dr else None,
+    }
+
+    # 2. Exfil regex
+    _cmd_stripped = cmd.lower().lstrip()
+    _is_commit = (
+        _cmd_stripped.startswith("git commit")
+        or (_cmd_stripped.startswith("git add") and "commit" in _cmd_stripped)
+    )
+    exfil_match = bool(_EXFIL_EXEC_RE.search(cmd)) and not _is_commit
+    loopback = bool(_LOOPBACK_RE.search(cmd))
+    results["exfil_exec"] = {
+        "triggered": exfil_match and not loopback,
+        "pattern_match": exfil_match,
+        "loopback_exempt": loopback,
+        "risk": 0.95 if (exfil_match and not loopback) else None,
+        "tier": -2 if (exfil_match and not loopback) else None,
+    }
+
+    # 3. Verb table
+    verb_hit = _verb_table_lookup(cmd)
+    results["verb_table"] = {
+        "triggered": verb_hit is not None,
+        "risk": verb_hit["risk"] if verb_hit else None,
+        "tier": verb_hit["tier"] if verb_hit else None,
+        "is_cap": verb_hit["is_cap"] if verb_hit else None,
+        "tool_verb": None,
+    }
+    if verb_hit:
+        tool, remainder = _parse_cli_verb(cmd)
+        results["verb_table"]["tool_verb"] = f"{tool} {remainder[:40]}"
+
+    # 4. Opaque exec
+    opaque = bool(_OPAQUE_EXEC_RE.search(cmd))
+    results["opaque_exec"] = {
+        "triggered": opaque,
+        "risk": 0.45 if opaque else None,
+        "tier": 2 if opaque else None,
+        "note": "floor — ML may score higher" if opaque else None,
+    }
+
+    # 5. Risk head MLP
+    emb = embed_command(cmd, model, dev)
+    risk_head_model: RiskHead | None = getattr(model, "_risk_head", None)
+    if risk_head_model is not None:
+        with torch.no_grad():
+            pred_risk = risk_head_model(emb.unsqueeze(0).to(dev)).item()
+        results["risk_head"] = {
+            "triggered": True,
+            "risk": round(pred_risk, 4),
+            "tier": _risk_to_tier(pred_risk),
+        }
+    else:
+        results["risk_head"] = {"triggered": False, "risk": None, "tier": None}
+
+    # 6. k-NN
+    dists = torch.norm(ref_embs - emb.unsqueeze(0), dim=1)
+    topk = dists.topk(k, largest=False)
+    neighbors = []
+    for i, d in zip(topk.indices.tolist(), topk.values.tolist()):
+        e = ref_entries[i]
+        neighbors.append({
+            "command": e.get("text", ""),
+            "risk": round(e["risk"], 3),
+            "tier": e["tier"],
+            "dist": round(d, 4),
+        })
+    eps = 1e-6
+    weights = [1.0 / max(d, eps) for d in topk.values.tolist()]
+    w_sum = sum(weights)
+    knn_risk = sum(w * ref_entries[i]["risk"]
+                   for w, i in zip(weights, topk.indices.tolist())) / w_sum
+    results["knn"] = {
+        "triggered": True,
+        "risk": round(knn_risk, 4),
+        "tier": _risk_to_tier(knn_risk),
+        "neighbors": neighbors,
+    }
+
+    # 7. Final prediction (the actual output of predict_risk)
+    final = predict_risk(cmd, model, dev, ref_embs, ref_entries, k)
+    winner = final.get("heuristic") or final.get("source", "unknown")
+
+    return {
+        "command": cmd,
+        "final": {
+            "risk": round(final["risk"], 4),
+            "tier": final["tier"],
+            "source": winner,
+            "decision": "interrupt" if final["risk"] >= 0.55 else "allow",
+        },
+        "scorers": results,
+    }
+
+
 def predict_risk(
     cmd: str,
     model: CommandEncoder,

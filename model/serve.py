@@ -39,7 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import torch
-from siamese import build_reference_index, embed_command, load_model, predict_risk
+from siamese import build_reference_index, compare_scorers, embed_command, load_model, predict_risk
 
 # ---------------------------------------------------------------------------
 # Config
@@ -195,6 +195,23 @@ def score(req: ScoreRequest) -> ScoreResponse:
 @app.post("/batch", response_model=BatchScoreResponse)
 def batch(req: BatchScoreRequest) -> BatchScoreResponse:
     return BatchScoreResponse(results=[_score_one(cmd) for cmd in req.commands])
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — compare (all scorers independently)
+# ---------------------------------------------------------------------------
+
+@app.post("/compare")
+def compare(req: ScoreRequest) -> dict:
+    """Run every scorer independently and return all results."""
+    result = compare_scorers(
+        req.command,
+        _state["model"], _state["dev"],
+        _state["ref_embs"], _state["ref_entries"],
+        k=K,
+    )
+    result["threshold"] = _config["threshold"]
+    return result
 
 
 # ---------------------------------------------------------------------------

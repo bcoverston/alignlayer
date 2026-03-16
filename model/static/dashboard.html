@@ -89,6 +89,23 @@
   .explain-result .neighbors { margin-top: 8px; }
   .explain-result .neighbor { color: var(--text-dim); padding: 2px 0; }
 
+  /* Compare panel */
+  .compare-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+  .scorer-card { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; }
+  .scorer-card.triggered { border-color: var(--accent); }
+  .scorer-card.dormant { opacity: 0.4; }
+  .scorer-name { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .scorer-risk { font-size: 18px; font-weight: bold; }
+  .scorer-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .compare-final { margin-top: 12px; padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; display: flex; align-items: center; gap: 16px; }
+  .compare-final .winner-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; }
+  .compare-final .winner-source { font-size: 14px; font-weight: bold; color: var(--accent); }
+  .agreement-bar { display: flex; gap: 2px; margin-top: 8px; }
+  .agreement-dot { width: 12px; height: 12px; border-radius: 2px; }
+  .agreement-dot.agree { background: var(--green); }
+  .agreement-dot.disagree { background: var(--red); }
+  .agreement-dot.inactive { background: var(--border); }
+
   /* Threshold slider */
   .threshold-slider { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
   .threshold-slider input[type="range"] { flex: 1; accent-color: var(--accent); }
@@ -186,6 +203,17 @@
         <button onclick="runExplain()">Explain</button>
       </div>
       <div class="explain-result" id="explain-result"></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card wide">
+      <h2>Comparative Scoring</h2>
+      <div class="explain-input">
+        <input type="text" id="compare-cmd" placeholder="Enter a command to compare all scorers..." />
+        <button onclick="runCompare()">Compare</button>
+      </div>
+      <div id="compare-result"></div>
     </div>
   </div>
 
@@ -449,11 +477,115 @@ async function runExplain() {
   }
 }
 
-// Enter key triggers explain
+// Enter key triggers explain / compare
 document.addEventListener('DOMContentLoaded', () => {
   const input = document.getElementById('explain-cmd');
   if (input) input.addEventListener('keydown', (e) => { if (e.key === 'Enter') runExplain(); });
+  const cmpInput = document.getElementById('compare-cmd');
+  if (cmpInput) cmpInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runCompare(); });
 });
+
+// --- Comparative scoring ---
+async function runCompare() {
+  const cmd = document.getElementById('compare-cmd').value.trim();
+  if (!cmd) return;
+  const el = document.getElementById('compare-result');
+  el.innerHTML = '<span style="color:var(--text-dim)">Running all scorers...</span>';
+  try {
+    const data = await fetch(API + '/compare', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command: cmd}),
+    }).then(r => r.json());
+
+    const scorerOrder = ['dry_run', 'exfil_exec', 'verb_table', 'opaque_exec', 'risk_head', 'knn'];
+    const scorerLabels = {
+      dry_run: 'Dry-Run Cap', exfil_exec: 'Exfil Detect',
+      verb_table: 'Verb Table', opaque_exec: 'Opaque Exec',
+      risk_head: 'RiskHead MLP', knn: 'k-NN Fallback',
+    };
+
+    // Build scorer cards
+    let cardsHtml = '<div class="compare-grid">';
+    const triggered = [];
+    const decisions = {};
+
+    for (const name of scorerOrder) {
+      const s = data.scorers[name];
+      const active = s && s.triggered;
+      const cls = active ? 'triggered' : 'dormant';
+      let riskHtml = '—';
+      let metaHtml = 'did not fire';
+
+      if (active) {
+        const risk = s.risk;
+        const tier = s.tier;
+        const tc = tierColor('T' + (tier >= 0 ? '+' : '') + tier);
+        riskHtml = `<span style="color:${riskColor(risk)}">${risk.toFixed(3)}</span>`;
+        metaHtml = `<span style="color:${tc}">${tierLabel(tier)}</span>`;
+        triggered.push(name);
+        decisions[name] = risk >= data.threshold ? 'interrupt' : 'allow';
+
+        // Extra details per scorer
+        if (name === 'verb_table' && s.tool_verb) {
+          metaHtml += `<br>match: ${s.tool_verb.slice(0, 40)}`;
+          if (s.is_cap) metaHtml += ' <span style="color:var(--green)">(cap)</span>';
+        }
+        if (name === 'exfil_exec') {
+          metaHtml += s.loopback_exempt ? '<br><span style="color:var(--green)">loopback exempt</span>' : '';
+        }
+        if (name === 'opaque_exec' && s.note) {
+          metaHtml += `<br>${s.note}`;
+        }
+        if (name === 'knn' && s.neighbors) {
+          metaHtml += `<br>top: ${s.neighbors[0]?.command?.slice(0, 35) || ''}...`;
+        }
+      }
+
+      cardsHtml += `<div class="scorer-card ${cls}">
+        <div class="scorer-name">${scorerLabels[name] || name}</div>
+        <div class="scorer-risk">${riskHtml}</div>
+        <div class="scorer-meta">${metaHtml}</div>
+      </div>`;
+    }
+    cardsHtml += '</div>';
+
+    // Agreement visualization
+    const finalDecision = data.final.risk >= data.threshold ? 'interrupt' : 'allow';
+    let agreeHtml = '<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">Agreement: ';
+    let agreeCount = 0, disagreeCount = 0;
+    agreeHtml += '<span class="agreement-bar">';
+    for (const name of scorerOrder) {
+      const s = data.scorers[name];
+      if (!s || !s.triggered) {
+        agreeHtml += '<span class="agreement-dot inactive" title="' + (scorerLabels[name] || name) + ' (inactive)"></span>';
+      } else {
+        const d = decisions[name];
+        const agrees = d === finalDecision;
+        agreeHtml += `<span class="agreement-dot ${agrees ? 'agree' : 'disagree'}" title="${scorerLabels[name]}: ${d}"></span>`;
+        if (agrees) agreeCount++; else disagreeCount++;
+      }
+    }
+    agreeHtml += `</span> ${agreeCount}/${agreeCount + disagreeCount} agree</div>`;
+
+    // Final result
+    const fc = data.final;
+    const ftc = tierColor('T' + (fc.tier >= 0 ? '+' : '') + fc.tier);
+    const finalHtml = `<div class="compare-final">
+      <div>
+        <div class="winner-label">Final Decision (${fc.source})</div>
+        <div class="winner-source" style="color:${fc.decision === 'interrupt' ? 'var(--red)' : 'var(--green)'}">${fc.decision.toUpperCase()}</div>
+      </div>
+      <span class="tier-badge" style="background:${ftc}22;color:${ftc}">${tierLabel(fc.tier)}</span>
+      <span style="color:${riskColor(fc.risk)}">risk=${fc.risk.toFixed(3)}</span>
+      <span style="color:var(--text-dim)">threshold=${data.threshold}</span>
+    </div>`;
+
+    el.innerHTML = cardsHtml + agreeHtml + finalHtml;
+  } catch (e) {
+    el.innerHTML = '<span style="color:var(--red)">Error — is the server running?</span>';
+  }
+}
 
 // --- Threshold slider ---
 const slider = document.getElementById('threshold-slider');
