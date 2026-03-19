@@ -21,7 +21,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from siamese import load_model, build_reference_index, predict_risk
+from siamese import load_model, build_reference_index, predict_risk, predict_encoder_only
 
 CHECKPOINT  = "model/checkpoints/best.pt"
 CORPUS      = "data/synthetic/scores-cache.jsonl"
@@ -47,13 +47,15 @@ def score_commands(
     ref_embs: torch.Tensor,
     ref_entries: list[dict],
     k: int,
+    encoder_only: bool = False,
 ) -> list[dict]:
+    score_fn = predict_encoder_only if encoder_only else predict_risk
     results = []
     for item in commands:
         cmd = item["cmd"]
         expected_tier = item["tier"]
         expected_risk = item.get("risk", 0.0)
-        pred = predict_risk(cmd, model, dev, ref_embs, ref_entries, k=k)
+        pred = score_fn(cmd, model, dev, ref_embs, ref_entries, k=k)
         pred_tier = pred["tier"]
         delta = pred_tier - expected_tier
         correct = abs(delta) <= 1
@@ -66,6 +68,7 @@ def score_commands(
             "delta": delta,
             "correct": correct,
             "heuristic": pred.get("heuristic"),
+            "source": pred.get("source"),
         })
     return results
 
@@ -123,8 +126,11 @@ def run_scenario_eval(
     corpus: str,
     scenarios_path: str,
     k: int,
+    encoder_only: bool = False,
 ) -> dict:
+    mode = "ENCODER-ONLY" if encoder_only else "full (heuristics + ML)"
     print(f"Loading model: {checkpoint}")
+    print(f"Scoring mode: {mode}")
     model, dev = load_model(checkpoint)
 
     print(f"Building k-NN index from {corpus}...")
@@ -140,7 +146,7 @@ def run_scenario_eval(
     for scenario in scenarios:
         sid = scenario["id"]
         cmds = scenario["commands"]
-        res = score_commands(cmds, model, dev, ref_embs, ref_entries, k)
+        res = score_commands(cmds, model, dev, ref_embs, ref_entries, k, encoder_only=encoder_only)
         n = len(res)
         c = sum(r["correct"] for r in res)
         worst_delta = max((abs(r["delta"]) for r in res), default=0)
@@ -242,12 +248,15 @@ def main():
     p.add_argument("--k",            type=int, default=5)
     p.add_argument("--no-write",     action="store_true",
                    help="Skip writing results to disk (for sweeps)")
+    p.add_argument("--encoder-only", action="store_true",
+                   help="Bypass all heuristics — pure encoder (RiskHead/k-NN) scoring")
     args = p.parse_args()
 
     if args.adversarial:
         metrics = run_adversarial_eval(args.checkpoint, args.corpus, args.adversarial, args.k)
     else:
-        metrics = run_scenario_eval(args.checkpoint, args.corpus, args.scenarios, args.k)
+        metrics = run_scenario_eval(args.checkpoint, args.corpus, args.scenarios, args.k,
+                                    encoder_only=args.encoder_only)
         if not args.no_write:
             write_results(metrics, args.checkpoint, args.corpus, args.k)
         else:

