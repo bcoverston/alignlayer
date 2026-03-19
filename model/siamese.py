@@ -868,6 +868,14 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     (re.compile(r"^brew$"),       re.compile(r"^(install|upgrade|uninstall|remove|tap|untap)\b"), 1, 0.28, True),
     (re.compile(r"^brew$"),       re.compile(r""),                                         0,  0.05, True),
 
+    # tmux/screen: session management is T0, kill is T2, send-keys is risky (proxy exec)
+    (re.compile(r"^tmux$"),       re.compile(r"^send-keys?\b"),                                  3,  0.65, False),
+    (re.compile(r"^tmux$"),       re.compile(r"^kill-(server|session)\b"),                        2,  0.45, False),
+    (re.compile(r"^tmux$"),       re.compile(r"^(ls|list-|display-|show-|has-session|info)\b"),   0,  0.05, True),
+    (re.compile(r"^tmux$"),       re.compile(r""),                                               0,  0.08, True),
+    (re.compile(r"^screen$"),     re.compile(r"-[Xx]\s+(quit|kill)\b"),                             2,  0.45, False),
+    (re.compile(r"^screen$"),     re.compile(r""),                                               0,  0.08, True),
+
     # xargs: risk depends on the command being invoked
     (re.compile(r"^xargs$"),  re.compile(r"\b(rm|rmdir)\b"),                              4,  0.80, False),
     (re.compile(r"^xargs$"),  re.compile(r"\b(chmod|chown|mv|kill)\b"),                   2,  0.45, False),
@@ -992,7 +1000,7 @@ def _verb_table_lookup(cmd: str) -> dict | None:
             "find", "gh", "terraform", "nginx", "ssh-keygen", "ssh-keyscan",
             "psql", "mysql", "mariadb", "sqlite3", "snowsql", "duckdb",
             "clickhouse-client", "trino", "presto", "cqlsh", "bq",
-            "mongosh", "mongo",
+            "mongosh", "mongo", "tmux", "screen",
             "pip", "pip3", "npm", "yarn", "pnpm", "journalctl", "curl", "sed",
             "helm", "systemctl", "brew", "xargs",
             "nc", "ncat", "netcat", "socat",
