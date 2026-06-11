@@ -908,7 +908,9 @@ _EXFIL_EXEC_RE = re.compile(
     r"|curl\s+.*-d\s+.*@/etc/(passwd|shadow)"
     r"|nc\s+-[a-z]*e\s+/bin/(ba)?sh"
     r"|/dev/tcp/"
-    r"|urllib\.request\.urlopen\("
+    # urlopen alone is a network read (= curl GET); exfil/RCE is the combination
+    # with dynamic execution. Plain-read payloads are tiered by py_payload.
+    r"|exec\(.*urlopen\(|urlopen\(.*\bexec\("
     r"|requests\.get\(.*\)\.text.*exec\("
     # download-and-execute chains: wget/curl && ... && ./script or bash script
     r"|wget\s+.*&&.*\./\w+.*\.sh"
@@ -948,6 +950,54 @@ _OPAQUE_EXEC_RE = re.compile(
     r"|base64\s+-d\s*\|",
     re.IGNORECASE,
 )
+
+
+# ---------------------------------------------------------------------------
+# Python payload scoring — `python3 -c '...'` and `python3 - <<'EOF'` carry
+# their script right in the command string. Score the payload by content
+# instead of applying the blind opaque_exec T2 floor (the largest real-world
+# FP class: benign scraping/formatting scripts interrupted every time).
+# ---------------------------------------------------------------------------
+
+_PY_INLINE_RE = re.compile(
+    r"^(?:\S+=\S+\s+)*(?:sudo\s+)?(?:\S*/)?python3?(?:\.\d+)?\s+(?:-[a-zA-Z]\s+)*-c\s+"
+    r"(?P<q>['\"])(?P<body>.*)(?P=q)\s*$",
+    re.DOTALL,
+)
+_PY_HEREDOC_RE = re.compile(
+    r"^(?:\S+=\S+\s+)*(?:sudo\s+)?(?:\S*/)?python3?(?:\.\d+)?\s+-?\s*<<-?\s*"
+    r"['\"]?(?P<delim>\w+)['\"]?\s*\n(?P<body>.*)\n(?P=delim)\s*$",
+    re.DOTALL,
+)
+
+# First match wins — ordered most to least severe. Shell escapes are handled
+# separately in predict_risk: they fall through to ML + opaque floor.
+_PY_SHELL_ESCAPE_RE = re.compile(
+    r"\bsubprocess\b|os\.system|os\.exec|os\.popen|\bpty\b|\bctypes\b"
+    r"|\beval\s*\(|\bexec\s*\(|\bcompile\s*\("
+)
+_PY_PAYLOAD_TIERS: list[tuple[re.Pattern, int, float, str]] = [
+    (re.compile(r"requests\.(post|put|delete|patch)|urlopen\s*\([^)]*data\s*="
+                r"|\bsmtplib\b|\bsocket\b|\bparamiko\b|\bftplib\b"),          3, 0.62, "network write"),
+    (re.compile(r"shutil\.rmtree|os\.remove|os\.unlink|os\.rmdir"),           2, 0.45, "destructive file ops"),
+    (re.compile(r"open\s*\([^)]*['\"][wax]b?['\"]|write_text\s*\(|write_bytes\s*\("
+                r"|shutil\.(copy|move)"),                                     1, 0.25, "local write"),
+    (re.compile(r"\burllib\b|requests\.get|\bhttpx\b|http\.client"),          1, 0.25, "network read"),
+]
+
+
+def _extract_py_payload(cmd: str) -> str | None:
+    """Inline python script from a -c arg or stdin heredoc, if the whole
+    command is a single python invocation. Compounds return None."""
+    m = _PY_HEREDOC_RE.match(cmd) or _PY_INLINE_RE.match(cmd)
+    return m.group("body") if m else None
+
+
+def _score_py_payload(payload: str) -> dict:
+    for pat, tier, risk, label in _PY_PAYLOAD_TIERS:
+        if pat.search(payload):
+            return {"tier": tier, "risk": risk, "note": label}
+    return {"tier": 0, "risk": 0.08, "note": "pure compute"}
 
 
 _CMD_PREFIXES = {"sudo", "env", "nice", "nohup", "caffeinate", "time", "do", "then", "else"}
@@ -1412,6 +1462,18 @@ def predict_risk(
         return {
             "command": cmd, "risk": 0.95, "tier": -2,
             "heuristic": "exfil_exec", "neighbors": [], "blast_radius": 0.0,
+        }
+
+    # Python inline/heredoc payload: score the script content, not the wrapper.
+    # Must run before compound splitting — heredoc bodies contain ; and | that
+    # would be shredded into nonsense subcommands. Shell-escape payloads
+    # (subprocess, os.system, exec) keep today's path: ML + opaque T2 floor.
+    payload = _extract_py_payload(cmd)
+    if payload is not None and not _PY_SHELL_ESCAPE_RE.search(payload):
+        scored = _score_py_payload(payload)
+        return {
+            "command": cmd, "risk": scored["risk"], "tier": scored["tier"],
+            "heuristic": "py_payload", "neighbors": [], "blast_radius": 0.0,
         }
 
     subcommands = _split_compound(cmd)
