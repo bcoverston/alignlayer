@@ -887,6 +887,10 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     (re.compile(r"^socat$"),  re.compile(r"EXEC:|exec:|SYSTEM:|system:"),                  -2, 0.95, False),
     (re.compile(r"^socat$"),  re.compile(r"TCP-LISTEN|tcp-listen"),                         3, 0.65, False),
 
+    # huggingface-cli / hf: download/search/info/whoami are reads; upload/delete are writes
+    (re.compile(r"^(huggingface-cli|hf)$"), re.compile(r"^(upload|delete|repo\s+create)\b"),  3,  0.62, False),
+    (re.compile(r"^(huggingface-cli|hf)$"), re.compile(r""),                                  0,  0.05, True),
+
     # done/fi/esac — closing keywords only, never risky on their own
     (re.compile(r"^(done|fi|esac)$"), re.compile(r""), 0, 0.03, True),
 ]
@@ -895,7 +899,11 @@ _EXFIL_EXEC_RE = re.compile(
     r'eval\s+"\$\(curl'
     r"|curl\s+.*\|\s*(sudo\s+)?(ba)?sh"
     r"|wget\s+.*\|\s*(sudo\s+)?(ba)?sh"
-    r"|curl\s+.*\|\s*python"
+    # curl | python: only exfil when piped to bare python (stdin execution).
+    # curl ... | python3 -m json.tool  → safe formatting, not matched.
+    # curl ... | python3 -c "..."      → inline script, caught by opaque_exec (T2).
+    # curl ... | python3               → stdin execution, caught here (T-2).
+    r"|curl\s+.*\|\s*python3?\s*$"
     r"|base64\s+-d\s*\|\s*(ba)?sh"
     r"|curl\s+.*-d\s+.*@/etc/(passwd|shadow)"
     r"|nc\s+-[a-z]*e\s+/bin/(ba)?sh"

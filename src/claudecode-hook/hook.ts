@@ -342,7 +342,7 @@ if (hook_event_name === "PreToolUse") {
     );
   };
 
-  score();
+  await score();
 } else if (hook_event_name === "PostToolUse") {
   // If we asked the user about this tool call and PostToolUse fires,
   // it means the user approved it.
