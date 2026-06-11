@@ -948,6 +948,29 @@ _LOOPBACK_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+# Hosts the user has declared as their own test targets, via
+# ALIGNLAYER_TRUSTED_HOSTS (comma-separated hostnames/IPs). Authorized
+# red-teaming against these should not trip exfil/RCE rules. Default empty →
+# None → behavior identical to the loopback-only exemption. Read once at import;
+# the scoring server restarts to pick up config, same as code/checkpoint changes.
+def _build_trusted_hosts_re() -> re.Pattern | None:
+    raw = os.environ.get("ALIGNLAYER_TRUSTED_HOSTS", "").strip()
+    hosts = [re.escape(h.strip()) for h in raw.split(",") if h.strip()]
+    if not hosts:
+        return None
+    # match scheme-prefixed URLs and bare host:port forms (nc/scp/ssh targets)
+    return re.compile(rf"(?:https?://)?(?:{'|'.join(hosts)})(?:[:/]|\b)", re.IGNORECASE)
+
+
+_TRUSTED_HOSTS_RE = _build_trusted_hosts_re()
+
+
+def _is_trusted_dest(cmd: str) -> bool:
+    """True if the command targets only loopback or a user-declared test host."""
+    return bool(_LOOPBACK_RE.search(cmd) or
+                (_TRUSTED_HOSTS_RE and _TRUSTED_HOSTS_RE.search(cmd)))
+
 _OPAQUE_EXEC_RE = re.compile(
     r"(?:python3?|node|perl|ruby|bash|sh)\s+-[ce]\s+"
     r"|(?<!\w)eval\s+[\$'\"`(]"
@@ -1373,7 +1396,7 @@ def compare_scorers(
         or (_cmd_stripped.startswith("git add") and "commit" in _cmd_stripped)
     )
     exfil_match = bool(_EXFIL_EXEC_RE.search(cmd)) and not _is_commit
-    loopback = bool(_LOOPBACK_RE.search(cmd))
+    loopback = _is_trusted_dest(cmd)
     results["exfil_exec"] = {
         "triggered": exfil_match and not loopback,
         "pattern_match": exfil_match,
@@ -1486,7 +1509,7 @@ def predict_risk(
         _cmd_stripped.startswith("git commit")
         or (_cmd_stripped.startswith("git add") and "commit" in _cmd_stripped)
     )
-    if not _is_commit and _EXFIL_EXEC_RE.search(cmd) and not _LOOPBACK_RE.search(cmd):
+    if not _is_commit and _EXFIL_EXEC_RE.search(cmd) and not _is_trusted_dest(cmd):
         return {
             "command": cmd, "risk": 0.95, "tier": -2,
             "heuristic": "exfil_exec", "neighbors": [], "blast_radius": 0.0,
@@ -1518,7 +1541,7 @@ def predict_risk(
             continue
 
         # --- Exfil / remote code execution floor (T-2) ---
-        if _EXFIL_EXEC_RE.search(sub) and not _LOOPBACK_RE.search(sub):
+        if _EXFIL_EXEC_RE.search(sub) and not _is_trusted_dest(sub):
             ml = _predict_single(sub, model, dev, ref_embs, ref_entries, k)
             ml["risk"]      = max(ml["risk"], 0.95)
             ml["tier"]      = -2

@@ -20,6 +20,10 @@
         <string>model/checkpoints/best.pt</string>
         <key>ALIGNLAYER_CORPUS</key>
         <string>data/synthetic/scores-cache.jsonl</string>
+        <!-- Comma-separated hosts/IPs you red-team or test against. Exfil/RCE
+             payloads aimed at these are not flagged. Empty = loopback-only. -->
+        <key>ALIGNLAYER_TRUSTED_HOSTS</key>
+        <string></string>
         <key>PORT</key>
         <string>8000</string>
     </dict>

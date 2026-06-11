@@ -16,6 +16,9 @@ Environment:
     ALIGNLAYER_CORPUS       path to scores-cache.jsonl (default: data/synthetic/scores-cache.jsonl)
     ALIGNLAYER_K            k-NN neighbors (default: 5)
     ALIGNLAYER_THRESHOLD    interrupt threshold 0-1 (default: 0.55)
+    ALIGNLAYER_TRUSTED_HOSTS comma-separated hosts/IPs you red-team or test
+                            against; exfil/RCE payloads aimed at these are not
+                            flagged (default: empty = loopback-only exemption)
     ALIGNLAYER_TRACES_DIR   trace output directory (default: data/traces)
     PORT                    listen port (default: 8000)
 """
