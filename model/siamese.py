@@ -990,6 +990,27 @@ _PY_PAYLOAD_TIERS: list[tuple[re.Pattern, int, float, str]] = [
     (re.compile(r"\burllib\b|requests\.get|\bhttpx\b|http\.client"),          1, 0.25, "network read"),
 ]
 
+# Path target of a destructive op decides severity: deleting a relative/project
+# path or /tmp is routine (T2, allowed); deleting a system path or a home secret
+# dir is dangerous (T3, interrupt). Only literal string args are inspected —
+# a dynamic path (variable) stays T2, since escalating every dynamic delete
+# would re-introduce the false positives py_payload exists to remove.
+_PY_DESTRUCTIVE_RE = re.compile(
+    r"(?:shutil\.rmtree|os\.remove|os\.unlink|os\.rmdir)\s*\(\s*"
+    r"(?P<q>['\"])(?P<path>[^'\"]*)(?P=q)"
+)
+_SENSITIVE_PATH_RE = re.compile(
+    r"^/(?:etc|usr|bin|sbin|var|boot|sys|lib|lib64|opt|dev|root|proc)\b"  # system dirs
+    r"|^/\s*$|^/\*"                                                       # bare root or /*
+    r"|^(?:~|\$HOME|/Users/[^/]+|/home/[^/]+)/\.(ssh|aws|gnupg|kube|config|docker)\b"  # secret dirs
+    r"|^(?:~|\$HOME)/?\s*$"                                               # the home dir itself
+)
+
+
+def _destructive_targets_sensitive(payload: str) -> bool:
+    return any(_SENSITIVE_PATH_RE.search(m.group("path"))
+               for m in _PY_DESTRUCTIVE_RE.finditer(payload))
+
 
 def _extract_py_payload(cmd: str) -> str | None:
     """Inline python script from a -c arg or stdin heredoc, if the whole
@@ -1001,6 +1022,8 @@ def _extract_py_payload(cmd: str) -> str | None:
 def _score_py_payload(payload: str) -> dict:
     for pat, tier, risk, label in _PY_PAYLOAD_TIERS:
         if pat.search(payload):
+            if label == "destructive file ops" and _destructive_targets_sensitive(payload):
+                return {"tier": 3, "risk": 0.62, "note": "destructive op on sensitive path"}
             return {"tier": tier, "risk": risk, "note": label}
     return {"tier": 0, "risk": 0.08, "note": "pure compute"}
 

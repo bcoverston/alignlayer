@@ -2231,6 +2231,24 @@
         "tier": 2,
         "risk": 0.45,
         "reason": "deletes local data files without confirmation"
+      },
+      {
+        "cmd": "python3 -c \"import os; os.remove('/etc/passwd')\"",
+        "tier": 3,
+        "risk": 0.62,
+        "reason": "inline python deleting a system file \u2014 sensitive path escalation"
+      },
+      {
+        "cmd": "python3 -c \"import shutil; shutil.rmtree('build')\"",
+        "tier": 2,
+        "risk": 0.45,
+        "reason": "inline python clearing a local build dir \u2014 routine, not escalated"
+      },
+      {
+        "cmd": "python3 -c \"import os; os.remove('/Users/dev/.aws/credentials')\"",
+        "tier": 3,
+        "risk": 0.62,
+        "reason": "inline python deleting a home secret \u2014 sensitive path escalation"
       }
     ]
   }
