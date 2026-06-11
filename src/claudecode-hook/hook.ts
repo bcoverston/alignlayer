@@ -143,6 +143,8 @@ interface TraceEntry {
   ts_risk: number | null;
   /** Populated in Phase 3 when hook returns "deny"/"ask" and user decides. */
   human_outcome: "approved" | "denied" | "allow-always" | null;
+  /** True when an "ask" was suppressed because the user approved the identical call earlier this session. */
+  session_approved?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +180,8 @@ interface SessionState {
   toolCallCount: number;
   /** tool_use_ids where we returned "ask" — PostToolUse means user approved. */
   askedIds: string[];
+  /** Signatures of calls the user already approved this session — don't re-ask. */
+  approvedSignatures: string[];
 }
 
 function sessionFilePath(sessionId: string): string {
@@ -188,9 +192,14 @@ function sessionFilePath(sessionId: string): string {
 
 function loadSession(sessionId: string): SessionState {
   try {
-    return JSON.parse(fs.readFileSync(sessionFilePath(sessionId), "utf8")) as SessionState;
+    const s = JSON.parse(fs.readFileSync(sessionFilePath(sessionId), "utf8")) as Partial<SessionState>;
+    return {
+      toolCallCount: s.toolCallCount ?? 0,
+      askedIds: s.askedIds ?? [],
+      approvedSignatures: s.approvedSignatures ?? [],
+    };
   } catch {
-    return { toolCallCount: 0, askedIds: [] };
+    return { toolCallCount: 0, askedIds: [], approvedSignatures: [] };
   }
 }
 
@@ -215,6 +224,31 @@ function markAsked(sessionId: string, toolUseId: string): void {
 function wasAsked(sessionId: string, toolUseId: string): boolean {
   const state = loadSession(sessionId);
   return state.askedIds.includes(toolUseId);
+}
+
+/**
+ * Exact-match identity for a tool call: tool name + normalized command (or
+ * full args for non-exec tools). Deliberately strict — an approval extends
+ * only to the identical call, never a "similar" one.
+ */
+function callSignature(toolName: string, toolInput: Record<string, unknown>): string {
+  const cmd = EXEC_TOOLS.has(toolName.toLowerCase())
+    ? String(toolInput["command"] ?? toolInput["cmd"] ?? toolInput["input"] ?? "")
+    : JSON.stringify(toolInput ?? {});
+  return `${toolName}:${cmd.trim().replace(/\s+/g, " ")}`;
+}
+
+function markApproved(sessionId: string, signature: string): void {
+  const state = loadSession(sessionId);
+  if (!state.approvedSignatures.includes(signature)) {
+    state.approvedSignatures.push(signature);
+    saveSession(sessionId, state);
+  }
+}
+
+function wasApproved(sessionId: string, signature: string): boolean {
+  const state = loadSession(sessionId);
+  return state.approvedSignatures.includes(signature);
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +334,28 @@ if (hook_event_name === "PreToolUse") {
     const decision: "allow" | "interrupt" =
       risk >= RISK_THRESHOLD ? "interrupt" : "allow";
 
+    let reason = source === "ml_model"
+      ? `alignlayer[ml]: risk=${risk.toFixed(2)} tier=T${mlTier ?? "?"} (ts_fallback=${tsRisk.toFixed(2)})`
+      : `alignlayer[ts]: risk=${risk.toFixed(2)} (blast=${br.toFixed(2)}, conf=${pc.toFixed(2)})`;
+
+    // Phase 1: "ask" on high-risk commands (user sees score, can approve).
+    // Only ask when ML model scored the command — TS fallback stays observational
+    // to avoid noisy prompts when the server is down.
+    let permissionDecision: "allow" | "ask" =
+      decision === "interrupt" && source === "ml_model" ? "ask" : "allow";
+
+    const sessionApproved =
+      permissionDecision === "ask" &&
+      wasApproved(session_id, callSignature(tool_name, tool_input));
+    if (sessionApproved) {
+      permissionDecision = "allow";
+      reason += " [session-approved]";
+    }
+
+    if (permissionDecision === "ask") {
+      markAsked(session_id, tool_use_id);
+    }
+
     appendTrace({
       runtime: "claudecode",
       session_id,
@@ -315,21 +371,8 @@ if (hook_event_name === "PreToolUse") {
       source: source as "ml_model" | "ts_heuristic",
       ts_risk: tsRisk,
       human_outcome: null,
+      session_approved: sessionApproved,
     });
-
-    const reason = source === "ml_model"
-      ? `alignlayer[ml]: risk=${risk.toFixed(2)} tier=T${mlTier ?? "?"} (ts_fallback=${tsRisk.toFixed(2)})`
-      : `alignlayer[ts]: risk=${risk.toFixed(2)} (blast=${br.toFixed(2)}, conf=${pc.toFixed(2)})`;
-
-    // Phase 1: "ask" on high-risk commands (user sees score, can approve).
-    // Only ask when ML model scored the command — TS fallback stays observational
-    // to avoid noisy prompts when the server is down.
-    const permissionDecision: "allow" | "ask" =
-      decision === "interrupt" && source === "ml_model" ? "ask" : "allow";
-
-    if (permissionDecision === "ask") {
-      markAsked(session_id, tool_use_id);
-    }
 
     process.stdout.write(
       JSON.stringify({
@@ -347,6 +390,9 @@ if (hook_event_name === "PreToolUse") {
   // If we asked the user about this tool call and PostToolUse fires,
   // it means the user approved it.
   const humanOutcome = wasAsked(session_id, tool_use_id) ? "approved" : null;
+  if (humanOutcome === "approved") {
+    markApproved(session_id, callSignature(tool_name, tool_input));
+  }
 
   appendTrace({
     runtime: "claudecode",
