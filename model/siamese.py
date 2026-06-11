@@ -767,6 +767,11 @@ _VERB_TABLE: list[tuple[re.Pattern, re.Pattern, int, float, bool]] = [
     # ssh read-only: cap at T0
     (re.compile(r"^ssh$"),        re.compile(r"(cat\s|tail\s|head\s|less\s|grep\s|ps\s|top\s|uptime|df\s|free\s|uname|hostname|whoami|id\b|env\b|printenv|systemctl\s+status\b|service\s+\S+\s+status\b|redis-cli\s+(ping|info)\b|pg_isready\b|netstat\b|ss\b|iptables\s+-L)"), 0, 0.08, True),
 
+    # scp: remote destination (last arg is host:path) → upload, T3 floor;
+    # remote source → local download, T1
+    (re.compile(r"^scp$"),        re.compile(r"[^\s:]+:\S*\s*$"),                          3, 0.62, False),
+    (re.compile(r"^scp$"),        re.compile(r":"),                                        1, 0.25, False),
+
     # docker / podman destructive
     (re.compile(r"^(docker|podman)$"), re.compile(r"^(system\s+prune|volume\s+prune|image\s+prune)\b"), 2, 0.48, False),
     (re.compile(r"^(docker|podman)$"), re.compile(r"^push\b"),                           3,  0.62, False),
@@ -1054,7 +1059,7 @@ def _verb_table_lookup(cmd: str) -> dict | None:
         if not tool_re.match(tool):
             continue
         target = remainder if tool in {
-            "aws", "kubectl", "git", "redis-cli", "ssh", "docker", "podman",
+            "aws", "kubectl", "git", "redis-cli", "ssh", "scp", "docker", "podman",
             "find", "gh", "terraform", "nginx", "ssh-keygen", "ssh-keyscan",
             "psql", "mysql", "mariadb", "sqlite3", "snowsql", "duckdb",
             "clickhouse-client", "trino", "presto", "cqlsh", "bq",
