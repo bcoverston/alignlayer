@@ -331,7 +331,9 @@ if (hook_event_name === "PreToolUse") {
     let mlScored = false;
     let mlTier: number | null = null;
 
-    if (cmdStr.length > 0 && cmdStr.length <= 2000) {
+    // 8000-char cap: long heredoc payloads must still reach the scorer —
+    // a length-based bypass is exactly the evasion the layer exists to stop.
+    if (cmdStr.length > 0 && cmdStr.length <= 8000) {
       const ml = await mlScore(cmdStr);
       if (ml) {
         risk = ml.risk;
