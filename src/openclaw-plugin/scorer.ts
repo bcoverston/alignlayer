@@ -221,7 +221,7 @@ function lookupVerbTable(
 function extractSshInner(cmd: string): string | null {
   // Capture single- or double-quoted trailing arg after the host
   const m = cmd.match(/^ssh\b.*?\s+(?:[^\s'"]+)\s+['"](.+)['"]\s*$/s);
-  return m ? m[1] : null;
+  return m?.[1] ?? null;
 }
 
 /**

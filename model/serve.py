@@ -123,6 +123,7 @@ class ScoreResponse(BaseModel):
     risk:     float
     tier:     int
     decision: str   # "allow" | "interrupt"
+    source:   str   # winning stage: exfil_exec | dry_run_cap | verb_table | opaque_exec | risk_head | knn
 
 
 class BatchScoreRequest(BaseModel):
@@ -152,6 +153,7 @@ def _score_one(command: str) -> ScoreResponse:
         risk=round(result["risk"], 4),
         tier=result["tier"],
         decision=decision,
+        source=result.get("heuristic") or result.get("source") or "unknown",
     )
 
 

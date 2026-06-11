@@ -137,8 +137,14 @@ interface TraceEntry {
   blast_radius: number | null;
   plan_confidence: number | null;
   decision: "allow" | "interrupt" | null;
-  /** Which scorer produced risk_score: "ml_model" or "ts_heuristic". */
-  source: "ml_model" | "ts_heuristic" | null;
+  /** Risk tier from the ML pipeline (-2..4), null for TS-heuristic-only scores. */
+  tier: number | null;
+  /**
+   * Which stage produced risk_score: a pipeline stage name from the scoring
+   * server (exfil_exec | dry_run_cap | verb_table | opaque_exec | risk_head |
+   * knn) or "ts_heuristic" when the server was unreachable.
+   */
+  source: string | null;
   /** TS heuristic score (always present on before_tool_call for comparison). */
   ts_risk: number | null;
   /** Populated in Phase 3 when hook returns "deny"/"ask" and user decides. */
@@ -261,6 +267,8 @@ interface MLScoreResult {
   risk: number;
   tier: number;
   decision: "allow" | "interrupt";
+  /** Winning pipeline stage; absent on older servers. */
+  source?: string;
 }
 
 function mlScore(command: string): Promise<MLScoreResult | null> {
@@ -320,13 +328,15 @@ if (hook_event_name === "PreToolUse") {
   const score = async () => {
     let risk = tsRisk;
     let source = "ts_heuristic";
+    let mlScored = false;
     let mlTier: number | null = null;
 
     if (cmdStr.length > 0 && cmdStr.length <= 2000) {
       const ml = await mlScore(cmdStr);
       if (ml) {
         risk = ml.risk;
-        source = "ml_model";
+        source = ml.source ?? "ml_model";
+        mlScored = true;
         mlTier = ml.tier;
       }
     }
@@ -334,15 +344,15 @@ if (hook_event_name === "PreToolUse") {
     const decision: "allow" | "interrupt" =
       risk >= RISK_THRESHOLD ? "interrupt" : "allow";
 
-    let reason = source === "ml_model"
-      ? `alignlayer[ml]: risk=${risk.toFixed(2)} tier=T${mlTier ?? "?"} (ts_fallback=${tsRisk.toFixed(2)})`
+    let reason = mlScored
+      ? `alignlayer[${source}]: risk=${risk.toFixed(2)} tier=T${mlTier ?? "?"} (ts_fallback=${tsRisk.toFixed(2)})`
       : `alignlayer[ts]: risk=${risk.toFixed(2)} (blast=${br.toFixed(2)}, conf=${pc.toFixed(2)})`;
 
     // Phase 1: "ask" on high-risk commands (user sees score, can approve).
     // Only ask when ML model scored the command — TS fallback stays observational
     // to avoid noisy prompts when the server is down.
     let permissionDecision: "allow" | "ask" =
-      decision === "interrupt" && source === "ml_model" ? "ask" : "allow";
+      decision === "interrupt" && mlScored ? "ask" : "allow";
 
     const sessionApproved =
       permissionDecision === "ask" &&
@@ -368,7 +378,8 @@ if (hook_event_name === "PreToolUse") {
       blast_radius: br,
       plan_confidence: pc,
       decision,
-      source: source as "ml_model" | "ts_heuristic",
+      tier: mlTier,
+      source,
       ts_risk: tsRisk,
       human_outcome: null,
       session_approved: sessionApproved,
@@ -406,6 +417,7 @@ if (hook_event_name === "PreToolUse") {
     blast_radius: null,
     plan_confidence: null,
     decision: null,
+    tier: null,
     source: null,
     ts_risk: null,
     human_outcome: humanOutcome,
